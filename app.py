@@ -76,7 +76,7 @@ def init_db():
         
     c.execute("SELECT count(*) FROM settings")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO settings VALUES ('company_name', 'My Modoo Business')")
+        c.execute("INSERT INTO settings VALUES ('company_name', 'Modoo Enterprise')")
         c.execute("INSERT INTO settings VALUES ('currency', 'USD')")
         
     conn.commit()
@@ -110,8 +110,9 @@ def post_journal_entry(date, description, reference, lines, doc_type=None, doc_i
 
 def create_document(doc_type, contact_id, date, lines_data):
     """Creates Invoice/Bill, updates Inventory, and posts Accounting Journals."""
-    prefix = "INV-" if doc_type == "Sale" else "BILL-"
-    doc_number = f"{prefix}{uuid.uuid4().hex[:6].upper()}"
+    prefix = "INV/" if doc_type == "Sale" else "BILL/"
+    year_prefix = datetime.now().year
+    doc_number = f"{prefix}{year_prefix}/{uuid.uuid4().hex[:4].upper()}"
     total_amount = sum(l['subtotal'] for l in lines_data)
     
     with get_db_connection() as conn:
@@ -123,36 +124,28 @@ def create_document(doc_type, contact_id, date, lines_data):
         total_cogs = 0.0
         
         for l in lines_data:
-            # Insert document line
             c.execute("INSERT INTO document_lines (doc_id, item_id, qty, unit_price, subtotal) VALUES (?,?,?,?,?)",
                       (doc_id, l['item_id'], l['qty'], l['unit_price'], l['subtotal']))
             
-            # Inventory logic
             if doc_type == "Sale":
                 c.execute("UPDATE items SET qty_on_hand = qty_on_hand - ? WHERE id = ?", (l['qty'], l['item_id']))
-                # Calculate COGS for this line
                 c.execute("SELECT cost_price FROM items WHERE id = ?", (l['item_id'],))
                 cost = c.fetchone()[0] or 0.0
                 total_cogs += (cost * l['qty'])
             elif doc_type == "Purchase":
                 c.execute("UPDATE items SET qty_on_hand = qty_on_hand + ? WHERE id = ?", (l['qty'], l['item_id']))
-                # Update moving average cost or last purchase price (simplifying to last purchase price here)
                 c.execute("UPDATE items SET cost_price = ? WHERE id = ?", (l['unit_price'], l['item_id']))
                 
         conn.commit()
 
-    # Accounting Logic
     journal_lines = []
     if doc_type == "Sale":
-        # AR Debit, Sales Credit
         journal_lines.append({'account_code': 1200, 'contact_id': contact_id, 'debit': total_amount, 'credit': 0})
         journal_lines.append({'account_code': 4000, 'contact_id': None, 'debit': 0, 'credit': total_amount})
-        # COGS Debit, Inventory Credit
         if total_cogs > 0:
             journal_lines.append({'account_code': 5000, 'contact_id': None, 'debit': total_cogs, 'credit': 0})
             journal_lines.append({'account_code': 1300, 'contact_id': None, 'debit': 0, 'credit': total_cogs})
     elif doc_type == "Purchase":
-        # Inventory Debit, AP Credit
         journal_lines.append({'account_code': 1300, 'contact_id': None, 'debit': total_amount, 'credit': 0})
         journal_lines.append({'account_code': 2000, 'contact_id': contact_id, 'debit': 0, 'credit': total_amount})
 
@@ -179,20 +172,79 @@ def get_account_balances():
     return df
 
 # ==========================================
-# 3. UI INITIALIZATION & SESSION
+# 3. UI INITIALIZATION (ODOO 19 STYLE)
 # ==========================================
 st.set_page_config(page_title="Modoo ERP", layout="wide", page_icon="🏢")
 
-# Custom Styling (Odoo-like professional tone with user's Wave style)
+# Odoo 19 Design Tokens
 st.markdown("""
     <style>
-    :root { --primary: #714B67; --secondary: #017E84; --bg: #f9f9f9; --text: #333333; }
-    .stApp { background-color: var(--bg); color: var(--text); }
-    section[data-testid="stSidebar"] { background-color: #ffffff !important; border-right: 1px solid #e3e9ed; }
-    .stButton>button { background-color: var(--secondary); color: white; border-radius: 4px; border:none; width: 100%;}
-    .stButton>button:hover { background-color: #016368; color: white; }
-    h1, h2, h3 { color: var(--primary); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    .metric-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; border-top: 4px solid var(--secondary);}
+    /* Odoo 19 Primary Colors */
+    :root { 
+        --odoo-purple: #714B67; 
+        --odoo-teal: #017E84; 
+        --odoo-gray-bg: #F4F7F9; 
+        --odoo-sidebar: #FFFFFF;
+        --odoo-card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    
+    .stApp { background-color: var(--odoo-gray-bg); }
+    
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] { 
+        background-color: var(--odoo-sidebar) !important; 
+        border-right: 1px solid #dee2e6;
+    }
+    
+    /* Buttons */
+    .stButton>button { 
+        background-color: var(--odoo-purple); 
+        color: white; 
+        border-radius: 6px; 
+        border: none; 
+        font-weight: 500;
+        padding: 0.5rem 1rem;
+        transition: all 0.2s ease;
+    }
+    .stButton>button:hover { 
+        background-color: #5a3c52; 
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(113, 75, 103, 0.2);
+    }
+    
+    /* Kanban/Metric Cards */
+    .metric-card { 
+        background: white; 
+        padding: 24px; 
+        border-radius: 12px; 
+        box-shadow: var(--odoo-card-shadow);
+        border: 1px solid #edf2f7;
+        margin-bottom: 1rem;
+    }
+    .metric-title { color: #718096; font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.025em; }
+    .metric-value { color: #1a202c; font-size: 1.5rem; font-weight: 700; margin-top: 4px; }
+    
+    /* Dataframe/Table styling */
+    .stDataFrame { border-radius: 12px; overflow: hidden; box-shadow: var(--odoo-card-shadow); }
+    
+    /* Headers */
+    h1, h2, h3 { color: #2d3748; font-family: 'Inter', sans-serif; font-weight: 700; }
+    
+    /* Navigation Active State (Simulated) */
+    .stRadio [role="radiogroup"] { gap: 8px; }
+    .stRadio label { 
+        background: white; 
+        padding: 10px 16px !important; 
+        border-radius: 8px !important; 
+        border: 1px solid #e2e8f0 !important;
+        cursor: pointer;
+    }
+    
+    /* Form fields */
+    .stTextInput input, .stNumberInput input, .stSelectbox select {
+        border-radius: 8px !important;
+        border: 1px solid #cbd5e0 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -205,13 +257,18 @@ if 'cart' not in st.session_state:
 # 4. LOGIN MODULE
 # ==========================================
 if not st.session_state.logged_in:
-    st.markdown("<h1 style='text-align: center; margin-top: 10%;'>🏢 Modoo ERP</h1>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1,1,1])
+    st.markdown("""
+        <div style='display: flex; flex-direction: column; align-items: center; justify-content: center; height: 60vh;'>
+            <h1 style='color: var(--odoo-purple); font-size: 3rem; margin-bottom: 0;'>Modoo</h1>
+            <p style='color: #718096; margin-bottom: 2rem;'>Open Source ERP Simplified</p>
+        </div>
+    """, unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.5, 1, 1.5])
     with c2:
         with st.form("login_form"):
-            user = st.text_input("Username")
+            user = st.text_input("Email / Username")
             pwd = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
+            submitted = st.form_submit_button("Log in")
             
             if submitted:
                 res = run_query("SELECT id, username, role FROM users WHERE username=? AND password=?", 
@@ -220,10 +277,10 @@ if not st.session_state.logged_in:
                     st.session_state.logged_in = True
                     st.session_state.username = res.iloc[0]['username']
                     st.session_state.role = res.iloc[0]['role']
-                    log_action("Login", "User logged in successfully")
+                    log_action("Login", "User session started")
                     st.rerun()
                 else:
-                    st.error("Invalid credentials. Default is admin/admin")
+                    st.error("Invalid credentials.")
     st.stop()
 
 # ==========================================
@@ -232,27 +289,30 @@ if not st.session_state.logged_in:
 company_name = run_query("SELECT value FROM settings WHERE key='company_name'", fetch=True).iloc[0]['value']
 currency = run_query("SELECT value FROM settings WHERE key='currency'", fetch=True).iloc[0]['value']
 
-st.sidebar.markdown(f"<h2>{company_name}</h2>", unsafe_allow_html=True)
-st.sidebar.write(f"Logged in as: **{st.session_state.username}** ({st.session_state.role})")
+with st.sidebar:
+    st.markdown(f"<h2 style='color: var(--odoo-purple); margin-bottom: 0;'>{company_name}</h2>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color: #718096; font-size: 0.8rem;'>Enterprise Edition 19.0</p>", unsafe_allow_html=True)
+    st.write("---")
+    
+    menus = ["Dashboard", "Contacts", "Inventory", "Sales", "Purchase", "Accounting", "Reporting"]
+    if st.session_state.role == "Admin":
+        menus.append("Settings")
 
-menus = ["Dashboard", "Contacts", "Inventory", "Sales", "Purchase", "Accounting", "Reporting"]
-if st.session_state.role == "Admin":
-    menus.append("Settings")
-
-if st.sidebar.button("Logout"):
-    log_action("Logout", "User logged out")
-    st.session_state.clear()
-    st.rerun()
-
-choice = st.sidebar.radio("Navigation", menus)
+    choice = st.radio("APPS", menus, label_visibility="collapsed")
+    
+    st.write("---")
+    st.write(f"👤 **{st.session_state.username}**")
+    if st.button("Logout", use_container_width=True):
+        log_action("Logout", "User session ended")
+        st.session_state.clear()
+        st.rerun()
 
 # ==========================================
 # 6. MODULES IMPLEMENTATION
 # ==========================================
 
 if choice == "Dashboard":
-    st.title("Dashboard")
-    st.markdown("### Your business at a glance")
+    st.title("Welcome back!")
     
     # Calculate key metrics
     balances = get_account_balances()
@@ -262,122 +322,141 @@ if choice == "Dashboard":
     sales = balances[balances['code'] == 4000]['balance'].sum()
     
     c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(f"<div class='metric-card'><h4>Cash & Bank</h4><h2>{currency} {cash:,.2f}</h2></div>", unsafe_allow_html=True)
-    c2.markdown(f"<div class='metric-card'><h4>Receivables (AR)</h4><h2>{currency} {ar:,.2f}</h2></div>", unsafe_allow_html=True)
-    c3.markdown(f"<div class='metric-card'><h4>Payables (AP)</h4><h2>{currency} {ap:,.2f}</h2></div>", unsafe_allow_html=True)
-    c4.markdown(f"<div class='metric-card'><h4>Total Sales</h4><h2>{currency} {sales:,.2f}</h2></div>", unsafe_allow_html=True)
+    with c1:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-title'>Liquidity</div>
+            <div class='metric-value'>{currency} {cash:,.2f}</div>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-title'>To Receive</div>
+            <div class='metric-value'>{currency} {ar:,.2f}</div>
+        </div>""", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-title'>To Pay</div>
+            <div class='metric-value'>{currency} {ap:,.2f}</div>
+        </div>""", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-title'>Annual Sales</div>
+            <div class='metric-value'>{currency} {sales:,.2f}</div>
+        </div>""", unsafe_allow_html=True)
     
-    st.markdown("---")
-    st.subheader("Recent Activity Log")
+    st.subheader("Recent Communications")
     logs = run_query("SELECT timestamp, user, action, details FROM audit_logs ORDER BY id DESC LIMIT 5", fetch=True)
     st.dataframe(logs, use_container_width=True, hide_index=True)
 
 
 elif choice == "Contacts":
-    st.title("Contacts (CRM)")
-    t1, t2 = st.tabs(["Directory", "Add Contact"])
+    st.title("Contacts")
+    t1, t2 = st.tabs(["List View", "Create New"])
     
     with t1:
-        contacts = run_query("SELECT * FROM contacts", fetch=True)
+        contacts = run_query("SELECT name, type, phone, email FROM contacts", fetch=True)
         st.dataframe(contacts, use_container_width=True, hide_index=True)
         
     with t2:
-        with st.form("new_contact"):
+        with st.form("new_contact", border=False):
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
             c1, c2 = st.columns(2)
-            name = c1.text_input("Name/Company")
+            name = c1.text_input("Name")
             ctype = c2.selectbox("Type", ["Customer", "Vendor", "Employee"])
-            phone = c1.text_input("Phone")
-            email = c2.text_input("Email")
+            phone = c1.text_input("Mobile")
+            email = c2.text_input("Email Address")
+            st.markdown("</div>", unsafe_allow_html=True)
             if st.form_submit_button("Save Contact"):
                 if name:
                     run_query("INSERT INTO contacts (name, type, phone, email) VALUES (?,?,?,?)", (name, ctype, phone, email))
-                    log_action("Created Contact", f"Name: {name}, Type: {ctype}")
-                    st.success("Contact added successfully!")
+                    log_action("Created Contact", f"{name} ({ctype})")
+                    st.success("Contact added.")
                     st.rerun()
 
 elif choice == "Inventory":
-    st.title("Inventory Management")
-    t1, t2 = st.tabs(["Stock Levels", "Add New Product"])
+    st.title("Inventory")
+    t1, t2 = st.tabs(["Stock Overview", "New Product"])
     
     with t1:
-        items = run_query("SELECT id, sku, name, type, qty_on_hand, cost_price, sales_price FROM items", fetch=True)
+        items = run_query("SELECT sku as SKU, name as Product, type as Type, qty_on_hand as 'On Hand', cost_price as Cost, sales_price as Price FROM items", fetch=True)
         st.dataframe(items, use_container_width=True, hide_index=True)
         
     with t2:
-        with st.form("new_item"):
+        with st.form("new_item", border=False):
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
             c1, c2 = st.columns(2)
             name = c1.text_input("Product Name")
-            sku = c2.text_input("SKU / Internal Reference")
-            itype = c1.selectbox("Product Type", ["Storable Product", "Service"])
-            cost = c1.number_input("Cost Price", min_value=0.0)
-            price = c2.number_input("Sales Price", min_value=0.0)
-            if st.form_submit_button("Save Product"):
+            sku = c2.text_input("Internal Reference (SKU)")
+            itype = c1.selectbox("Product Type", ["Storable Product", "Service", "Consumable"])
+            cost = c1.number_input("Cost", min_value=0.0, format="%.2f")
+            price = c2.number_input("Sales Price", min_value=0.0, format="%.2f")
+            st.markdown("</div>", unsafe_allow_html=True)
+            if st.form_submit_button("Create Product"):
                 if name:
                     run_query("INSERT INTO items (name, sku, type, qty_on_hand, cost_price, sales_price) VALUES (?,?,?,0,?,?)",
                               (name, sku, itype, cost, price))
-                    log_action("Created Product", f"Name: {name}")
-                    st.success("Product saved!")
+                    log_action("Created Product", name)
                     st.rerun()
 
 def render_transaction_module(doc_type):
     is_sale = (doc_type == "Sale")
-    st.title(f"{'Sales Invoices' if is_sale else 'Purchase Bills'}")
+    st.title(f"{'Quotations / Invoices' if is_sale else 'Vendor Bills'}")
     
-    t1, t2 = st.tabs(["Create New", "History"])
+    t1, t2 = st.tabs(["New Document", "All Records"])
     
     with t1:
-        # Fetch data for dropdowns
         contact_type = "Customer" if is_sale else "Vendor"
-        contacts = run_query(f"SELECT id, name FROM contacts WHERE type='{contact_type}'", fetch=True)
-        items = run_query("SELECT id, name, sales_price, cost_price, qty_on_hand FROM items", fetch=True)
+        contacts_df = run_query(f"SELECT id, name FROM contacts WHERE type='{contact_type}'", fetch=True)
+        items_df = run_query("SELECT id, name, sales_price, cost_price FROM items", fetch=True)
         
-        if contacts.empty or items.empty:
-            st.warning(f"Please ensure you have created at least one {contact_type} and one Product.")
+        if contacts_df.empty or items_df.empty:
+            st.warning(f"Configuration required: Add {contact_type} and Products first.")
             return
 
-        c_options = dict(zip(contacts['name'], contacts['id']))
-        i_options = dict(zip(items['name'], items['id']))
+        c_options = dict(zip(contacts_df['name'], contacts_df['id']))
+        i_options = dict(zip(items_df['name'], items_df['id']))
         
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            selected_contact = st.selectbox(contact_type, list(c_options.keys()))
-            doc_date = st.date_input("Date")
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        selected_contact = col1.selectbox(contact_type, list(c_options.keys()))
+        doc_date = col2.date_input("Invoice Date")
+        st.markdown("</div>", unsafe_allow_html=True)
         
-        with col2:
-            st.markdown("**Cart Details**")
-            with st.form("add_to_cart_form"):
-                sc1, sc2, sc3 = st.columns(3)
-                sel_item = sc1.selectbox("Product", list(i_options.keys()))
-                qty = sc2.number_input("Quantity", min_value=1.0, value=1.0)
-                
-                # Default price logic based on type
-                def_price = items[items['name']==sel_item]['sales_price'].values[0] if is_sale else items[items['name']==sel_item]['cost_price'].values[0]
-                price = sc3.number_input("Unit Price", min_value=0.0, value=float(def_price))
-                
-                if st.form_submit_button("Add to Cart"):
-                    item_id = i_options[sel_item]
-                    st.session_state.cart.append({
-                        'item_id': item_id, 'name': sel_item, 'qty': qty, 
-                        'unit_price': price, 'subtotal': qty * price
-                    })
-                    st.rerun()
+        st.markdown("### Order Lines")
+        with st.form("add_line_form", border=False):
+            sc1, sc2, sc3, sc4 = st.columns([3, 1, 1, 1])
+            sel_item = sc1.selectbox("Product", list(i_options.keys()))
+            qty = sc2.number_input("Qty", min_value=1.0, value=1.0)
             
-            if st.session_state.cart:
-                cart_df = pd.DataFrame(st.session_state.cart)
-                st.dataframe(cart_df[['name', 'qty', 'unit_price', 'subtotal']], use_container_width=True)
-                st.markdown(f"### Total: {currency} {cart_df['subtotal'].sum():,.2f}")
-                
-                if st.button(f"Confirm & Post {doc_type}"):
-                    doc_no = create_document(doc_type, c_options[selected_contact], doc_date, st.session_state.cart)
-                    st.session_state.cart = [] # clear cart
-                    st.success(f"{doc_type} {doc_no} posted successfully! Inventory and Accounts updated.")
-                if st.button("Clear Cart"):
-                    st.session_state.cart = []
-                    st.rerun()
+            def_price = items_df[items_df['name']==sel_item]['sales_price'].values[0] if is_sale else items_df[items_df['name']==sel_item]['cost_price'].values[0]
+            price = sc3.number_input("Unit Price", min_value=0.0, value=float(def_price))
+            
+            if sc4.form_submit_button("➕ Add"):
+                st.session_state.cart.append({
+                    'item_id': i_options[sel_item], 'name': sel_item, 'qty': qty, 
+                    'unit_price': price, 'subtotal': qty * price
+                })
+                st.rerun()
+        
+        if st.session_state.cart:
+            cart_df = pd.DataFrame(st.session_state.cart)
+            st.dataframe(cart_df[['name', 'qty', 'unit_price', 'subtotal']], use_container_width=True, hide_index=True)
+            
+            total = cart_df['subtotal'].sum()
+            st.markdown(f"<h2 style='text-align: right;'>Total: {currency} {total:,.2f}</h2>", unsafe_allow_html=True)
+            
+            c_btn1, c_btn2 = st.columns([1, 5])
+            if c_btn1.button("Confirm", use_container_width=True):
+                doc_no = create_document(doc_type, c_options[selected_contact], doc_date, st.session_state.cart)
+                st.session_state.cart = []
+                st.success(f"Posted: {doc_no}")
+                st.rerun()
+            if c_btn2.button("Discard"):
+                st.session_state.cart = []
+                st.rerun()
 
     with t2:
         history = run_query(f"""
-            SELECT d.doc_number, d.date, c.name as contact, d.total_amount 
+            SELECT d.doc_number as Number, d.date as Date, c.name as Partner, d.total_amount as Total 
             FROM documents d JOIN contacts c ON d.contact_id = c.id 
             WHERE d.doc_type='{doc_type}' ORDER BY d.id DESC
         """, fetch=True)
@@ -385,148 +464,133 @@ def render_transaction_module(doc_type):
 
 if choice == "Sales":
     render_transaction_module("Sale")
-
 elif choice == "Purchase":
     render_transaction_module("Purchase")
 
 elif choice == "Accounting":
-    st.title("Accounting")
-    t1, t2, t3 = st.tabs(["Chart of Accounts", "Manual Journal Entry", "Partner Ledger"])
+    st.title("Invoicing & Accounting")
+    t1, t2, t3 = st.tabs(["General Ledger", "Journal Entry", "Partner Balances"])
     
     with t1:
-        st.subheader("Chart of Accounts & Balances")
+        st.subheader("Chart of Accounts")
         b_df = get_account_balances()
         st.dataframe(b_df[['code', 'name', 'type', 'balance']], use_container_width=True, hide_index=True)
         
     with t2:
-        st.subheader("Post Manual Journal (e.g., Cash Receipt, Payments)")
+        st.subheader("Post a Journal")
         accounts = run_query("SELECT code, name FROM accounts", fetch=True)
         acc_dict = {f"{r['code']} - {r['name']}": r['code'] for _, r in accounts.iterrows()}
         
-        with st.form("journal_form"):
+        with st.form("j_form", border=False):
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
             j_date = st.date_input("Date")
-            j_desc = st.text_input("Description / Memo")
-            
+            j_desc = st.text_input("Reference / Label")
             c1, c2 = st.columns(2)
             dr_acc = c1.selectbox("Debit Account", list(acc_dict.keys()))
-            dr_amt = c1.number_input("Debit Amount", min_value=0.0)
-            
-            cr_acc = c2.selectbox("Credit Account", list(acc_dict.keys()))
-            cr_amt = c2.number_input("Credit Amount", min_value=0.0)
-            
-            if st.form_submit_button("Post Journal"):
-                if dr_amt != cr_amt:
-                    st.error("Debit and Credit must be equal.")
-                elif dr_amt > 0:
+            dr_amt = c1.number_input("Debit", min_value=0.0)
+            cr_acc = c2.selectbox("Credit Account", list(acc_dict.keys()), index=1)
+            cr_amt = c2.number_input("Credit", min_value=0.0)
+            st.markdown("</div>", unsafe_allow_html=True)
+            if st.form_submit_button("Confirm Entry"):
+                if dr_amt != cr_amt or dr_amt == 0:
+                    st.error("Entry must be balanced and greater than zero.")
+                else:
                     lines = [
                         {'account_code': acc_dict[dr_acc], 'debit': dr_amt, 'credit': 0},
                         {'account_code': acc_dict[cr_acc], 'debit': 0, 'credit': cr_amt}
                     ]
                     if post_journal_entry(j_date, j_desc, "Manual", lines):
-                        log_action("Manual Journal", f"Amt: {dr_amt}, Dr: {dr_acc}, Cr: {cr_acc}")
-                        st.success("Journal Posted Successfully")
+                        st.success("Entry Posted.")
                         st.rerun()
 
     with t3:
-        st.subheader("Partner Ledger (Customer/Vendor Account)")
         contacts = run_query("SELECT id, name FROM contacts", fetch=True)
         if not contacts.empty:
             c_dict = dict(zip(contacts['name'], contacts['id']))
-            sel_c = st.selectbox("Select Partner", list(c_dict.keys()))
-            
+            sel_c = st.selectbox("Partner", list(c_dict.keys()))
             ledger = run_query(f"""
-                SELECT e.date, e.description, e.reference, l.debit, l.credit
+                SELECT e.date as Date, e.description as Label, l.debit as Debit, l.credit as Credit
                 FROM journal_entries e 
                 JOIN journal_lines l ON e.id = l.entry_id
                 WHERE l.contact_id = {c_dict[sel_c]}
                 ORDER BY e.date
             """, fetch=True)
-            
             if not ledger.empty:
-                ledger['Balance'] = ledger['debit'].cumsum() - ledger['credit'].cumsum()
+                ledger['Balance'] = ledger['Debit'].cumsum() - ledger['Credit'].cumsum()
                 st.dataframe(ledger, use_container_width=True, hide_index=True)
-                st.metric("Net Balance", f"{currency} {ledger['Balance'].iloc[-1]:,.2f}")
-            else:
-                st.info("No transactions found for this partner.")
+                st.metric("Running Balance", f"{currency} {ledger['Balance'].iloc[-1]:,.2f}")
 
 elif choice == "Reporting":
-    st.title("Financial Reporting")
-    rep_type = st.radio("Select Report", ["Profit & Loss", "Balance Sheet"])
+    st.title("Reports")
+    rep_type = st.segmented_control("Selection", ["Profit & Loss", "Balance Sheet"], default="Profit & Loss")
     
     b_df = get_account_balances()
     
     if rep_type == "Profit & Loss":
-        st.subheader("Profit & Loss Statement")
         revenue = b_df[b_df['type'] == 'Revenue']['balance'].sum()
         cogs = b_df[b_df['code'] == 5000]['balance'].sum()
-        gross_profit = revenue - cogs
         expenses = b_df[(b_df['type'] == 'Expense') & (b_df['code'] != 5000)]['balance'].sum()
-        net_profit = gross_profit - expenses
-        
         st.markdown(f"""
-        <div style="background:white; padding:20px; border-radius:8px; border-left:5px solid var(--secondary);">
-            <h4>Total Revenue: {currency} {revenue:,.2f}</h4>
-            <h4 style="color:red;">Cost of Goods Sold: {currency} {cogs:,.2f}</h4>
-            <h3>Gross Profit: {currency} {gross_profit:,.2f}</h3>
-            <h4 style="color:red;">Operating Expenses: {currency} {expenses:,.2f}</h4>
+        <div class='metric-card'>
+            <p>Net Income</p>
+            <h1 style='color: var(--odoo-teal);'>{currency} {revenue - cogs - expenses:,.2f}</h1>
             <hr>
-            <h2 style="color:var(--primary);">Net Profit: {currency} {net_profit:,.2f}</h2>
+            <div style='display: flex; justify-content: space-between;'>
+                <span>Revenue</span><span>{currency} {revenue:,.2f}</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; color: #e53e3e;'>
+                <span>COGS</span><span>({currency} {cogs:,.2f})</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; color: #e53e3e;'>
+                <span>Expenses</span><span>({currency} {expenses:,.2f})</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
     elif rep_type == "Balance Sheet":
-        st.subheader("Balance Sheet")
         assets = b_df[b_df['type'] == 'Asset']['balance'].sum()
         liab = b_df[b_df['type'] == 'Liability']['balance'].sum()
         equity = b_df[b_df['type'] == 'Equity']['balance'].sum()
-        
-        # Add current year net profit to equity
         rev = b_df[b_df['type'] == 'Revenue']['balance'].sum()
         exp = b_df[b_df['type'] == 'Expense']['balance'].sum()
-        current_earnings = rev - exp
-        total_equity_liab = liab + equity + current_earnings
+        current_profit = rev - exp
         
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(f"### Assets")
-            st.dataframe(b_df[b_df['type'] == 'Asset'][['name', 'balance']], hide_index=True)
+            st.dataframe(b_df[b_df['type'] == 'Asset'][['name', 'balance']], use_container_width=True, hide_index=True)
             st.markdown(f"**Total Assets: {currency} {assets:,.2f}**")
         with c2:
             st.markdown(f"### Liabilities & Equity")
-            st.dataframe(b_df[b_df['type'].isin(['Liability', 'Equity'])][['name', 'balance']], hide_index=True)
-            st.markdown(f"Current Year Earnings: {currency} {current_earnings:,.2f}")
-            st.markdown(f"**Total Liab & Equity: {currency} {total_equity_liab:,.2f}**")
+            st.dataframe(b_df[b_df['type'].isin(['Liability', 'Equity'])][['name', 'balance']], use_container_width=True, hide_index=True)
+            st.write(f"Current Profit: {currency} {current_profit:,.2f}")
+            st.markdown(f"**Total: {currency} {liab + equity + current_profit:,.2f}**")
 
 elif choice == "Settings":
-    st.title("System Settings")
+    st.title("Settings")
     
-    with st.expander("Company Settings", expanded=True):
-        with st.form("settings_form"):
+    with st.expander("Company Configuration", expanded=True):
+        with st.form("settings_form", border=False):
             new_comp = st.text_input("Company Name", value=company_name)
-            new_curr = st.text_input("Currency Symbol", value=currency)
-            if st.form_submit_button("Update Details"):
+            new_curr = st.text_input("Currency", value=currency)
+            if st.form_submit_button("Save Changes"):
                 run_query("UPDATE settings SET value=? WHERE key='company_name'", (new_comp,))
                 run_query("UPDATE settings SET value=? WHERE key='currency'", (new_curr,))
-                log_action("Updated Settings", "Company Details")
-                st.success("Settings updated! Please refresh the page.")
+                st.success("Updated.")
+                st.rerun()
                 
-    with st.expander("User Management"):
-        users = run_query("SELECT id, username, role FROM users", fetch=True)
-        st.dataframe(users, hide_index=True)
-        st.markdown("**Add New User**")
-        with st.form("add_user"):
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password")
+    with st.expander("Users & Access"):
+        st.dataframe(run_query("SELECT username, role FROM users", fetch=True), hide_index=True)
+        with st.form("add_user", border=False):
+            u = st.text_input("New Username")
+            p = st.text_input("New Password", type="password")
             r = st.selectbox("Role", ["Admin", "User"])
-            if st.form_submit_button("Create User"):
+            if st.form_submit_button("Invite User"):
                 try:
                     run_query("INSERT INTO users (username, password, role) VALUES (?,?,?)", (u, hash_password(p), r))
-                    log_action("Created User", f"Username: {u}")
-                    st.success("User created.")
+                    st.success("User added.")
                     st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("Username already exists!")
+                except: st.error("Duplicate user.")
 
-    with st.expander("System Logs"):
-        logs = run_query("SELECT * FROM audit_logs ORDER BY id DESC", fetch=True)
-        st.dataframe(logs, use_container_width=True, hide_index=True)
+    with st.expander("Developer Logs"):
+        st.dataframe(run_query("SELECT * FROM audit_logs ORDER BY id DESC", fetch=True), hide_index=True)

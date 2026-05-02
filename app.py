@@ -1,590 +1,532 @@
-# app.py
-# Modoo — Mini Odoo-like app (single-file Streamlit app)
-# Replaces and upgrades your existing app.py with:
-# - modular DB schema (users, partners, products, stock, invoices, invoice_lines, journals, journal_entries, journal_lines, audit_log)
-# - role-based login
-# - sales invoices and purchase bills that update inventory and post journal entries
-# - audit log (who/when/what)
-# - Odoo-like sidebar modules and list+form patterns
-#
-# Run: streamlit run app.py
-
 import streamlit as st
-import sqlite3
 import pandas as pd
-from datetime import datetime, date
+import sqlite3
+from datetime import datetime
 import hashlib
-import os
+import uuid
 
-DB_FILE = "modoo_app.db"
+# ==========================================
+# 1. DATABASE SETUP & UTILITIES
+# ==========================================
+DB_NAME = 'modoo_erp.db'
 
-# -------------------------
-# Utilities and DB helpers
-# -------------------------
-def get_conn():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+def get_db_connection():
+    """Returns a new database connection."""
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def run_sql(query, params=(), fetch=False):
-    conn = get_conn()
-    if fetch:
-        df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
-        return df
-    cur = conn.cursor()
-    cur.execute(query, params)
-    conn.commit()
-    conn.close()
+def run_query(query, params=(), fetch=False):
+    """Executes a query and optionally returns data as a DataFrame."""
+    with get_db_connection() as conn:
+        if fetch:
+            return pd.read_sql(query, conn, params=params)
+        conn.execute(query, params)
+        conn.commit()
 
-def hash_pw(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-def now_iso():
-    return datetime.utcnow().isoformat()
+def log_action(action, details=""):
+    """Logs user actions into the audit log."""
+    user = st.session_state.get('username', 'System')
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_query("INSERT INTO audit_logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
+              (timestamp, user, action, details))
 
-# -------------------------
-# Initialize database
-# -------------------------
 def init_db():
-    conn = get_conn()
+    """Initializes the database schema and default records."""
+    conn = get_db_connection()
     c = conn.cursor()
+    
+    # Users & Settings
+    c.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY, timestamp TEXT, user TEXT, action TEXT, details TEXT)''')
+    
+    # Master Data
+    c.execute('''CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT, type TEXT, phone TEXT, email TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT, sku TEXT, type TEXT, qty_on_hand REAL, cost_price REAL, sales_price REAL)''')
+    
+    # Accounting Core
+    c.execute('''CREATE TABLE IF NOT EXISTS accounts (code INTEGER PRIMARY KEY, name TEXT, type TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS journal_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, description TEXT, reference TEXT, doc_type TEXT, doc_id INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS journal_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, entry_id INTEGER, account_code INTEGER, contact_id INTEGER, debit REAL, credit REAL)''')
+    
+    # Documents (Invoices/Bills)
+    c.execute('''CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_type TEXT, doc_number TEXT, contact_id INTEGER, date TEXT, total_amount REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS document_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id INTEGER, item_id INTEGER, qty REAL, unit_price REAL, subtotal REAL)''')
 
-    # users
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        full_name TEXT,
-        email TEXT UNIQUE,
-        password_hash TEXT,
-        role TEXT,
-        active INTEGER DEFAULT 1
-    )""")
-
-    # partners (contacts)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS partners (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        partner_type TEXT, -- customer / supplier
-        email TEXT,
-        phone TEXT,
-        notes TEXT
-    )""")
-
-    # products and stock
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sku TEXT UNIQUE,
-        name TEXT,
-        uom TEXT,
-        cost_price REAL DEFAULT 0,
-        sale_price REAL DEFAULT 0
-    )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS stock (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id INTEGER,
-        qty REAL DEFAULT 0,
-        last_updated TEXT,
-        FOREIGN KEY(product_id) REFERENCES products(id)
-    )""")
-
-    # invoices (sales & purchase) and lines
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS invoices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        date TEXT,
-        partner_id INTEGER,
-        total REAL,
-        status TEXT, -- draft/posted/cancelled
-        type TEXT, -- sale / purchase
-        reference TEXT,
-        posted_by INTEGER,
-        posted_at TEXT
-    )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS invoice_lines (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invoice_id INTEGER,
-        product_id INTEGER,
-        description TEXT,
-        qty REAL,
-        unit_price REAL,
-        line_total REAL
-    )""")
-
-    # journals and ledger
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS journals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        code TEXT
-    )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS journal_entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        journal_id INTEGER,
-        date TEXT,
-        ref TEXT,
-        narration TEXT,
-        posted_by INTEGER,
-        posted_at TEXT
-    )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS journal_lines (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        entry_id INTEGER,
-        account TEXT,
-        debit REAL DEFAULT 0,
-        credit REAL DEFAULT 0,
-        party_id INTEGER
-    )""")
-
-    # audit log
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        action TEXT,
-        module TEXT,
-        object_type TEXT,
-        object_id INTEGER,
-        timestamp TEXT,
-        details TEXT
-    )""")
-
-    conn.commit()
-
-    # seed admin user and journals if empty
+    # Seed Default Data
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
-        admin_pw = hash_pw("admin")
-        c.execute("INSERT INTO users (username, full_name, email, password_hash, role) VALUES (?,?,?,?,?)",
-                  ("admin", "Administrator", "admin@example.com", admin_pw, "admin"))
-    c.execute("SELECT count(*) FROM journals")
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "Admin"))
+        
+    c.execute("SELECT count(*) FROM accounts")
     if c.fetchone()[0] == 0:
-        c.executemany("INSERT INTO journals (name, code) VALUES (?,?)",
-                      [("Sales Journal", "SALES"), ("Purchase Journal", "PUR"), ("General Journal", "GEN")])
+        coa = [
+            (1000, 'Cash on Hand', 'Asset'), (1100, 'Bank Account', 'Asset'),
+            (1200, 'Accounts Receivable', 'Asset'), (1300, 'Inventory', 'Asset'),
+            (2000, 'Accounts Payable', 'Liability'),
+            (3000, 'Retained Earnings', 'Equity'),
+            (4000, 'Sales Revenue', 'Revenue'),
+            (5000, 'Cost of Goods Sold', 'Expense'), (5100, 'Operating Expenses', 'Expense')
+        ]
+        c.executemany("INSERT INTO accounts VALUES (?,?,?)", coa)
+        
+    c.execute("SELECT count(*) FROM settings")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO settings VALUES ('company_name', 'My Modoo Business')")
+        c.execute("INSERT INTO settings VALUES ('currency', 'USD')")
+        
     conn.commit()
     conn.close()
 
+# Initialize database on startup
 init_db()
 
-# -------------------------
-# Audit helper
-# -------------------------
-def audit(user_id, action, module, object_type, object_id, details=""):
-    ts = now_iso()
-    run_sql("INSERT INTO audit_log (user_id, action, module, object_type, object_id, timestamp, details) VALUES (?,?,?,?,?,?,?)",
-            (user_id, action, module, object_type, object_id, ts, details))
+# ==========================================
+# 2. BUSINESS LOGIC ENGINE
+# ==========================================
+def post_journal_entry(date, description, reference, lines, doc_type=None, doc_id=None):
+    """Posts a balanced double-entry journal."""
+    total_dr = sum(l['debit'] for l in lines)
+    total_cr = sum(l['credit'] for l in lines)
+    if round(total_dr, 2) != round(total_cr, 2):
+        st.error(f"Unbalanced Journal! Dr: {total_dr} | Cr: {total_cr}")
+        return False
 
-# -------------------------
-# Business logic
-# -------------------------
-def next_number(prefix):
-    df = run_sql("SELECT number FROM invoices WHERE number LIKE ? ORDER BY id DESC LIMIT 1", (f"{prefix}-%",), fetch=True)
-    if df.empty:
-        return f"{prefix}-0001"
-    last = df['number'].iloc[0]
-    try:
-        n = int(last.split("-")[-1]) + 1
-    except:
-        n = 1
-    return f"{prefix}-{n:04d}"
-
-def post_sale_invoice(invoice_id, user_id):
-    inv_df = run_sql("SELECT * FROM invoices WHERE id=?", (invoice_id,), fetch=True)
-    if inv_df.empty:
-        raise ValueError("Invoice not found")
-    inv = inv_df.iloc[0].to_dict()
-    if inv['status'] == 'posted':
-        return "Already posted"
-
-    lines = run_sql("SELECT * FROM invoice_lines WHERE invoice_id=?", (invoice_id,), fetch=True)
-    total = 0.0
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        # update stock (decrease) and compute totals
-        for _, row in lines.iterrows():
-            pid = int(row['product_id'])
-            qty = float(row['qty'])
-            unit_price = float(row['unit_price'])
-            total += qty * unit_price
-            cur.execute("SELECT qty FROM stock WHERE product_id=?", (pid,))
-            r = cur.fetchone()
-            if r:
-                new_qty = r[0] - qty
-                cur.execute("UPDATE stock SET qty=?, last_updated=? WHERE product_id=?", (new_qty, now_iso(), pid))
-            else:
-                # insert negative stock record
-                cur.execute("INSERT INTO stock (product_id, qty, last_updated) VALUES (?,?,?)", (pid, -qty, now_iso()))
-
-        # create journal entry: Debit AR, Credit Sales
-        je_date = now_iso()
-        cur.execute("INSERT INTO journal_entries (journal_id, date, ref, narration, posted_by, posted_at) VALUES (?,?,?,?,?,?)",
-                    (1, je_date, inv['number'], f"Invoice {inv['number']}", user_id, je_date))
-        entry_id = cur.lastrowid
-        # Debit Accounts Receivable
-        cur.execute("INSERT INTO journal_lines (entry_id, account, debit, credit, party_id) VALUES (?,?,?,?,?)",
-                    (entry_id, "Accounts Receivable", total, 0, inv['partner_id']))
-        # Credit Sales
-        cur.execute("INSERT INTO journal_lines (entry_id, account, debit, credit, party_id) VALUES (?,?,?,?,?)",
-                    (entry_id, "Sales", 0, total, inv['partner_id']))
-
-        # mark invoice posted
-        cur.execute("UPDATE invoices SET status='posted', posted_by=?, posted_at=? WHERE id=?", (user_id, je_date, invoice_id))
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO journal_entries (date, description, reference, doc_type, doc_id) VALUES (?,?,?,?,?)",
+                  (date, description, reference, doc_type, doc_id))
+        entry_id = c.lastrowid
+        
+        for l in lines:
+            c.execute("INSERT INTO journal_lines (entry_id, account_code, contact_id, debit, credit) VALUES (?,?,?,?,?)",
+                      (entry_id, l['account_code'], l.get('contact_id'), l.get('debit', 0.0), l.get('credit', 0.0)))
         conn.commit()
-        audit(user_id, "post", "sales", "invoice", invoice_id, f"Posted invoice {inv['number']}")
-        return "posted"
-    except Exception as e:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return True
 
-def post_purchase_bill(invoice_id, user_id):
-    inv_df = run_sql("SELECT * FROM invoices WHERE id=?", (invoice_id,), fetch=True)
-    if inv_df.empty:
-        raise ValueError("Bill not found")
-    inv = inv_df.iloc[0].to_dict()
-    if inv['status'] == 'posted':
-        return "Already posted"
-
-    lines = run_sql("SELECT * FROM invoice_lines WHERE invoice_id=?", (invoice_id,), fetch=True)
-    total = 0.0
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        # update stock (increase)
-        for _, row in lines.iterrows():
-            pid = int(row['product_id'])
-            qty = float(row['qty'])
-            unit_price = float(row['unit_price'])
-            total += qty * unit_price
-            cur.execute("SELECT qty FROM stock WHERE product_id=?", (pid,))
-            r = cur.fetchone()
-            if r:
-                new_qty = r[0] + qty
-                cur.execute("UPDATE stock SET qty=?, last_updated=? WHERE product_id=?", (new_qty, now_iso(), pid))
-            else:
-                cur.execute("INSERT INTO stock (product_id, qty, last_updated) VALUES (?,?,?)", (pid, qty, now_iso()))
-
-        # create journal entry: Debit Inventory, Credit Accounts Payable
-        je_date = now_iso()
-        cur.execute("INSERT INTO journal_entries (journal_id, date, ref, narration, posted_by, posted_at) VALUES (?,?,?,?,?,?)",
-                    (2, je_date, inv['number'], f"Bill {inv['number']}", user_id, je_date))
-        entry_id = cur.lastrowid
-        cur.execute("INSERT INTO journal_lines (entry_id, account, debit, credit, party_id) VALUES (?,?,?,?,?)",
-                    (entry_id, "Inventory", total, 0, inv['partner_id']))
-        cur.execute("INSERT INTO journal_lines (entry_id, account, debit, credit, party_id) VALUES (?,?,?,?,?)",
-                    (entry_id, "Accounts Payable", 0, total, inv['partner_id']))
-
-        # mark bill posted
-        cur.execute("UPDATE invoices SET status='posted', posted_by=?, posted_at=? WHERE id=?", (user_id, je_date, invoice_id))
+def create_document(doc_type, contact_id, date, lines_data):
+    """Creates Invoice/Bill, updates Inventory, and posts Accounting Journals."""
+    prefix = "INV-" if doc_type == "Sale" else "BILL-"
+    doc_number = f"{prefix}{uuid.uuid4().hex[:6].upper()}"
+    total_amount = sum(l['subtotal'] for l in lines_data)
+    
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO documents (doc_type, doc_number, contact_id, date, total_amount) VALUES (?,?,?,?,?)",
+                  (doc_type, doc_number, contact_id, date, total_amount))
+        doc_id = c.lastrowid
+        
+        total_cogs = 0.0
+        
+        for l in lines_data:
+            # Insert document line
+            c.execute("INSERT INTO document_lines (doc_id, item_id, qty, unit_price, subtotal) VALUES (?,?,?,?,?)",
+                      (doc_id, l['item_id'], l['qty'], l['unit_price'], l['subtotal']))
+            
+            # Inventory logic
+            if doc_type == "Sale":
+                c.execute("UPDATE items SET qty_on_hand = qty_on_hand - ? WHERE id = ?", (l['qty'], l['item_id']))
+                # Calculate COGS for this line
+                c.execute("SELECT cost_price FROM items WHERE id = ?", (l['item_id'],))
+                cost = c.fetchone()[0] or 0.0
+                total_cogs += (cost * l['qty'])
+            elif doc_type == "Purchase":
+                c.execute("UPDATE items SET qty_on_hand = qty_on_hand + ? WHERE id = ?", (l['qty'], l['item_id']))
+                # Update moving average cost or last purchase price (simplifying to last purchase price here)
+                c.execute("UPDATE items SET cost_price = ? WHERE id = ?", (l['unit_price'], l['item_id']))
+                
         conn.commit()
-        audit(user_id, "post", "purchase", "bill", invoice_id, f"Posted bill {inv['number']}")
-        return "posted"
-    except Exception as e:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
-# -------------------------
-# Streamlit UI
-# -------------------------
-st.set_page_config(page_title="Modoo — Mini Odoo", layout="wide")
+    # Accounting Logic
+    journal_lines = []
+    if doc_type == "Sale":
+        # AR Debit, Sales Credit
+        journal_lines.append({'account_code': 1200, 'contact_id': contact_id, 'debit': total_amount, 'credit': 0})
+        journal_lines.append({'account_code': 4000, 'contact_id': None, 'debit': 0, 'credit': total_amount})
+        # COGS Debit, Inventory Credit
+        if total_cogs > 0:
+            journal_lines.append({'account_code': 5000, 'contact_id': None, 'debit': total_cogs, 'credit': 0})
+            journal_lines.append({'account_code': 1300, 'contact_id': None, 'debit': 0, 'credit': total_cogs})
+    elif doc_type == "Purchase":
+        # Inventory Debit, AP Credit
+        journal_lines.append({'account_code': 1300, 'contact_id': None, 'debit': total_amount, 'credit': 0})
+        journal_lines.append({'account_code': 2000, 'contact_id': contact_id, 'debit': 0, 'credit': total_amount})
+
+    post_journal_entry(date, f"{doc_type} {doc_number}", doc_number, journal_lines, doc_type, doc_id)
+    log_action(f"Created {doc_type}", f"Doc: {doc_number}, Amount: {total_amount}")
+    return doc_number
+
+def get_account_balances():
+    """Calculates balances based on standard accounting rules."""
+    df = run_query("""
+        SELECT a.code, a.name, a.type, 
+               COALESCE(SUM(l.debit), 0) as total_dr, 
+               COALESCE(SUM(l.credit), 0) as total_cr
+        FROM accounts a
+        LEFT JOIN journal_lines l ON a.code = l.account_code
+        GROUP BY a.code, a.name, a.type
+    """, fetch=True)
+    
+    def calc_balance(row):
+        if row['type'] in ['Asset', 'Expense']: return row['total_dr'] - row['total_cr']
+        else: return row['total_cr'] - row['total_dr']
+        
+    df['balance'] = df.apply(calc_balance, axis=1)
+    return df
+
+# ==========================================
+# 3. UI INITIALIZATION & SESSION
+# ==========================================
+st.set_page_config(page_title="Modoo ERP", layout="wide", page_icon="🏢")
+
+# Custom Styling (Odoo-like professional tone with user's Wave style)
 st.markdown("""
     <style>
-    :root { --modoo-green: #0b8457; --modoo-navy: #0b2b3a; --modoo-bg: #f7fafb; }
-    .stApp { background-color: var(--modoo-bg); }
-    section[data-testid="stSidebar"] { background-color: #ffffff !important; border-right: 1px solid #e6eef2; }
-    .stButton>button { background-color: var(--modoo-green); color: white; border-radius: 6px; border: none; }
-    h1, h2, h3 { color: var(--modoo-navy); font-family: Inter, sans-serif; }
+    :root { --primary: #714B67; --secondary: #017E84; --bg: #f9f9f9; --text: #333333; }
+    .stApp { background-color: var(--bg); color: var(--text); }
+    section[data-testid="stSidebar"] { background-color: #ffffff !important; border-right: 1px solid #e3e9ed; }
+    .stButton>button { background-color: var(--secondary); color: white; border-radius: 4px; border:none; width: 100%;}
+    .stButton>button:hover { background-color: #016368; color: white; }
+    h1, h2, h3 { color: var(--primary); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    .metric-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; border-top: 4px solid var(--secondary);}
     </style>
 """, unsafe_allow_html=True)
 
-# session
-if 'user' not in st.session_state:
-    st.session_state.user = None
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+if 'cart' not in st.session_state:
+    st.session_state.cart = []
 
-# ---------- Authentication helpers ----------
-def login_ui():
-    st.sidebar.subheader("Sign in")
-    username = st.sidebar.text_input("Username", key="login_username")
-    password = st.sidebar.text_input("Password", type="password", key="login_password")
-    if st.sidebar.button("Login", key="login_button"):
-        df = run_sql("SELECT id, username, full_name, role, password_hash FROM users WHERE username=?", (username,), fetch=True)
-        if not df.empty and hash_pw(password) == df['password_hash'].iloc[0]:
-            # set session state only; do NOT call st.experimental_rerun() here
-            st.session_state.user = dict(df.iloc[0])
-            audit(st.session_state.user['id'], "login", "auth", "user", st.session_state.user['id'], "User logged in")
-            st.sidebar.success(f"Welcome {st.session_state.user['full_name']}")
-            # mark that we should rerun once after returning
-            st.session_state._just_logged_in = True
-        else:
-            st.sidebar.error("Invalid credentials")
-
-def logout_ui():
-    if st.sidebar.button("Logout", key="logout_button"):
-        if st.session_state.user:
-            audit(st.session_state.user['id'], "logout", "auth", "user", st.session_state.user['id'], "User logged out")
-        st.session_state.user = None
-        st.experimental_rerun()
-
-# ---------- Main auth flow (top of your script) ----------
-if 'user' not in st.session_state:
-    st.session_state.user = None
-if '_just_logged_in' not in st.session_state:
-    st.session_state._just_logged_in = False
-
-# show login UI if not logged in
-if not st.session_state.user:
-    login_ui()
-    st.sidebar.markdown("Default admin credentials: **admin / admin**")
-    st.title("Modoo — Mini Odoo (Login required)")
-    st.info("Please login to access modules.")
-    # if login_ui set the flag, rerun once to refresh the app into logged-in state
-    if st.session_state._just_logged_in:
-        st.session_state._just_logged_in = False
-        st.experimental_rerun()
+# ==========================================
+# 4. LOGIN MODULE
+# ==========================================
+if not st.session_state.logged_in:
+    st.markdown("<h1 style='text-align: center; margin-top: 10%;'>🏢 Modoo ERP</h1>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1,1,1])
+    with c2:
+        with st.form("login_form"):
+            user = st.text_input("Username")
+            pwd = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            
+            if submitted:
+                res = run_query("SELECT id, username, role FROM users WHERE username=? AND password=?", 
+                                (user, hash_password(pwd)), fetch=True)
+                if not res.empty:
+                    st.session_state.logged_in = True
+                    st.session_state.username = res.iloc[0]['username']
+                    st.session_state.role = res.iloc[0]['role']
+                    log_action("Login", "User logged in successfully")
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials. Default is admin/admin")
     st.stop()
-else:
-    st.sidebar.write(f"**{st.session_state.user['full_name']}** — {st.session_state.user['role']}")
-    logout_ui()
 
+# ==========================================
+# 5. SIDEBAR NAVIGATION
+# ==========================================
+company_name = run_query("SELECT value FROM settings WHERE key='company_name'", fetch=True).iloc[0]['value']
+currency = run_query("SELECT value FROM settings WHERE key='currency'", fetch=True).iloc[0]['value']
 
-# Sidebar modules (Odoo-like)
-modules = [
-    "Dashboard",
-    "Contacts",
-    "Products & Inventory",
-    "Sales Invoices",
-    "Purchase Bills",
-    "Journal Entries",
-    "Audit Log",
-    "Settings"
-]
-choice = st.sidebar.radio("Modules", modules)
+st.sidebar.markdown(f"<h2>{company_name}</h2>", unsafe_allow_html=True)
+st.sidebar.write(f"Logged in as: **{st.session_state.username}** ({st.session_state.role})")
 
-# -------------------------
-# Dashboard
-# -------------------------
+menus = ["Dashboard", "Contacts", "Inventory", "Sales", "Purchase", "Accounting", "Reporting"]
+if st.session_state.role == "Admin":
+    menus.append("Settings")
+
+if st.sidebar.button("Logout"):
+    log_action("Logout", "User logged out")
+    st.session_state.clear()
+    st.rerun()
+
+choice = st.sidebar.radio("Navigation", menus)
+
+# ==========================================
+# 6. MODULES IMPLEMENTATION
+# ==========================================
+
 if choice == "Dashboard":
     st.title("Dashboard")
-    # KPIs
-    ar = run_sql("SELECT SUM(debit - credit) as ar FROM journal_lines WHERE account='Accounts Receivable'", fetch=True)
-    ap = run_sql("SELECT SUM(credit - debit) as ap FROM journal_lines WHERE account='Accounts Payable'", fetch=True)
-    inv_val = run_sql("""SELECT SUM(IFNULL(s.qty,0) * IFNULL(p.cost_price,0)) as inv_val
-                        FROM products p LEFT JOIN stock s ON p.id=s.product_id""", fetch=True)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Accounts Receivable (approx)", f"Rs. {float(ar['ar'].iloc[0] or 0):,.2f}")
-    col2.metric("Accounts Payable (approx)", f"Rs. {float(ap['ap'].iloc[0] or 0):,.2f}")
-    col3.metric("Inventory Value", f"Rs. {float(inv_val['inv_val'].iloc[0] or 0):,.2f}")
+    st.markdown("### Your business at a glance")
+    
+    # Calculate key metrics
+    balances = get_account_balances()
+    cash = balances[balances['code'].isin([1000, 1100])]['balance'].sum()
+    ar = balances[balances['code'] == 1200]['balance'].sum()
+    ap = balances[balances['code'] == 2000]['balance'].sum()
+    sales = balances[balances['code'] == 4000]['balance'].sum()
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(f"<div class='metric-card'><h4>Cash & Bank</h4><h2>{currency} {cash:,.2f}</h2></div>", unsafe_allow_html=True)
+    c2.markdown(f"<div class='metric-card'><h4>Receivables (AR)</h4><h2>{currency} {ar:,.2f}</h2></div>", unsafe_allow_html=True)
+    c3.markdown(f"<div class='metric-card'><h4>Payables (AP)</h4><h2>{currency} {ap:,.2f}</h2></div>", unsafe_allow_html=True)
+    c4.markdown(f"<div class='metric-card'><h4>Total Sales</h4><h2>{currency} {sales:,.2f}</h2></div>", unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.subheader("Recent Activity Log")
+    logs = run_query("SELECT timestamp, user, action, details FROM audit_logs ORDER BY id DESC LIMIT 5", fetch=True)
+    st.dataframe(logs, use_container_width=True, hide_index=True)
 
-    st.markdown("### Recent Activity")
-    recent = run_sql("SELECT a.id, u.full_name as user, a.action, a.module, a.object_type, a.object_id, a.timestamp, a.details FROM audit_log a LEFT JOIN users u ON a.user_id=u.id ORDER BY a.timestamp DESC LIMIT 20", fetch=True)
-    st.dataframe(recent)
 
-# -------------------------
-# Contacts
-# -------------------------
 elif choice == "Contacts":
-    st.title("Contacts")
-    with st.form("add_contact", clear_on_submit=True):
-        name = st.text_input("Name")
-        ptype = st.selectbox("Type", ["customer", "supplier"])
-        email = st.text_input("Email")
-        phone = st.text_input("Phone")
-        notes = st.text_area("Notes")
-        if st.form_submit_button("Save"):
-            run_sql("INSERT INTO partners (name, partner_type, email, phone, notes) VALUES (?,?,?,?,?)", (name, ptype, email, phone, notes))
-            audit(st.session_state.user['id'], "create", "contacts", "partner", None, f"Created partner {name}")
-            st.success("Contact saved")
-            st.experimental_rerun()
-    st.markdown("### All Contacts")
-    df = run_sql("SELECT id, name, partner_type, email, phone FROM partners ORDER BY name", fetch=True)
-    st.dataframe(df)
+    st.title("Contacts (CRM)")
+    t1, t2 = st.tabs(["Directory", "Add Contact"])
+    
+    with t1:
+        contacts = run_query("SELECT * FROM contacts", fetch=True)
+        st.dataframe(contacts, use_container_width=True, hide_index=True)
+        
+    with t2:
+        with st.form("new_contact"):
+            c1, c2 = st.columns(2)
+            name = c1.text_input("Name/Company")
+            ctype = c2.selectbox("Type", ["Customer", "Vendor", "Employee"])
+            phone = c1.text_input("Phone")
+            email = c2.text_input("Email")
+            if st.form_submit_button("Save Contact"):
+                if name:
+                    run_query("INSERT INTO contacts (name, type, phone, email) VALUES (?,?,?,?)", (name, ctype, phone, email))
+                    log_action("Created Contact", f"Name: {name}, Type: {ctype}")
+                    st.success("Contact added successfully!")
+                    st.rerun()
 
-# -------------------------
-# Products & Inventory
-# -------------------------
-elif choice == "Products & Inventory":
-    st.title("Products & Inventory")
-    with st.form("add_product", clear_on_submit=True):
-        sku = st.text_input("SKU")
-        name = st.text_input("Name")
-        uom = st.text_input("UOM", value="pcs")
-        cost = st.number_input("Cost Price", value=0.0, format="%.2f")
-        sale = st.number_input("Sale Price", value=0.0, format="%.2f")
-        if st.form_submit_button("Add Product"):
-            run_sql("INSERT INTO products (sku, name, uom, cost_price, sale_price) VALUES (?,?,?,?,?)", (sku, name, uom, cost, sale))
-            audit(st.session_state.user['id'], "create", "inventory", "product", None, f"Created product {name}")
-            st.success("Product added")
-            st.experimental_rerun()
+elif choice == "Inventory":
+    st.title("Inventory Management")
+    t1, t2 = st.tabs(["Stock Levels", "Add New Product"])
+    
+    with t1:
+        items = run_query("SELECT id, sku, name, type, qty_on_hand, cost_price, sales_price FROM items", fetch=True)
+        st.dataframe(items, use_container_width=True, hide_index=True)
+        
+    with t2:
+        with st.form("new_item"):
+            c1, c2 = st.columns(2)
+            name = c1.text_input("Product Name")
+            sku = c2.text_input("SKU / Internal Reference")
+            itype = c1.selectbox("Product Type", ["Storable Product", "Service"])
+            cost = c1.number_input("Cost Price", min_value=0.0)
+            price = c2.number_input("Sales Price", min_value=0.0)
+            if st.form_submit_button("Save Product"):
+                if name:
+                    run_query("INSERT INTO items (name, sku, type, qty_on_hand, cost_price, sales_price) VALUES (?,?,?,0,?,?)",
+                              (name, sku, itype, cost, price))
+                    log_action("Created Product", f"Name: {name}")
+                    st.success("Product saved!")
+                    st.rerun()
 
-    st.markdown("### Stock")
-    df = run_sql("""SELECT p.id as product_id, p.sku, p.name, p.uom, p.cost_price, p.sale_price,
-                   IFNULL(s.qty,0) as qty FROM products p LEFT JOIN stock s ON p.id=s.product_id ORDER BY p.name""", fetch=True)
-    st.dataframe(df, use_container_width=True)
+def render_transaction_module(doc_type):
+    is_sale = (doc_type == "Sale")
+    st.title(f"{'Sales Invoices' if is_sale else 'Purchase Bills'}")
+    
+    t1, t2 = st.tabs(["Create New", "History"])
+    
+    with t1:
+        # Fetch data for dropdowns
+        contact_type = "Customer" if is_sale else "Vendor"
+        contacts = run_query(f"SELECT id, name FROM contacts WHERE type='{contact_type}'", fetch=True)
+        items = run_query("SELECT id, name, sales_price, cost_price, qty_on_hand FROM items", fetch=True)
+        
+        if contacts.empty or items.empty:
+            st.warning(f"Please ensure you have created at least one {contact_type} and one Product.")
+            return
 
-    st.markdown("### Adjust Stock (quick)")
-    with st.form("adjust_stock"):
-        products = run_sql("SELECT id, name FROM products ORDER BY name", fetch=True)
-        prod_options = products['id'].tolist() if not products.empty else []
-        prod = st.selectbox("Product", options=prod_options, format_func=lambda x: products[products['id']==x]['name'].iloc[0] if not products.empty else "")
-        adj_qty = st.number_input("Adjust quantity (use negative to reduce)", value=0.0)
-        if st.form_submit_button("Apply Adjustment"):
-            if prod == "" or prod is None:
-                st.error("Select a product first")
+        c_options = dict(zip(contacts['name'], contacts['id']))
+        i_options = dict(zip(items['name'], items['id']))
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            selected_contact = st.selectbox(contact_type, list(c_options.keys()))
+            doc_date = st.date_input("Date")
+        
+        with col2:
+            st.markdown("**Cart Details**")
+            with st.form("add_to_cart_form"):
+                sc1, sc2, sc3 = st.columns(3)
+                sel_item = sc1.selectbox("Product", list(i_options.keys()))
+                qty = sc2.number_input("Quantity", min_value=1.0, value=1.0)
+                
+                # Default price logic based on type
+                def_price = items[items['name']==sel_item]['sales_price'].values[0] if is_sale else items[items['name']==sel_item]['cost_price'].values[0]
+                price = sc3.number_input("Unit Price", min_value=0.0, value=float(def_price))
+                
+                if st.form_submit_button("Add to Cart"):
+                    item_id = i_options[sel_item]
+                    st.session_state.cart.append({
+                        'item_id': item_id, 'name': sel_item, 'qty': qty, 
+                        'unit_price': price, 'subtotal': qty * price
+                    })
+                    st.rerun()
+            
+            if st.session_state.cart:
+                cart_df = pd.DataFrame(st.session_state.cart)
+                st.dataframe(cart_df[['name', 'qty', 'unit_price', 'subtotal']], use_container_width=True)
+                st.markdown(f"### Total: {currency} {cart_df['subtotal'].sum():,.2f}")
+                
+                if st.button(f"Confirm & Post {doc_type}"):
+                    doc_no = create_document(doc_type, c_options[selected_contact], doc_date, st.session_state.cart)
+                    st.session_state.cart = [] # clear cart
+                    st.success(f"{doc_type} {doc_no} posted successfully! Inventory and Accounts updated.")
+                if st.button("Clear Cart"):
+                    st.session_state.cart = []
+                    st.rerun()
+
+    with t2:
+        history = run_query(f"""
+            SELECT d.doc_number, d.date, c.name as contact, d.total_amount 
+            FROM documents d JOIN contacts c ON d.contact_id = c.id 
+            WHERE d.doc_type='{doc_type}' ORDER BY d.id DESC
+        """, fetch=True)
+        st.dataframe(history, use_container_width=True, hide_index=True)
+
+if choice == "Sales":
+    render_transaction_module("Sale")
+
+elif choice == "Purchase":
+    render_transaction_module("Purchase")
+
+elif choice == "Accounting":
+    st.title("Accounting")
+    t1, t2, t3 = st.tabs(["Chart of Accounts", "Manual Journal Entry", "Partner Ledger"])
+    
+    with t1:
+        st.subheader("Chart of Accounts & Balances")
+        b_df = get_account_balances()
+        st.dataframe(b_df[['code', 'name', 'type', 'balance']], use_container_width=True, hide_index=True)
+        
+    with t2:
+        st.subheader("Post Manual Journal (e.g., Cash Receipt, Payments)")
+        accounts = run_query("SELECT code, name FROM accounts", fetch=True)
+        acc_dict = {f"{r['code']} - {r['name']}": r['code'] for _, r in accounts.iterrows()}
+        
+        with st.form("journal_form"):
+            j_date = st.date_input("Date")
+            j_desc = st.text_input("Description / Memo")
+            
+            c1, c2 = st.columns(2)
+            dr_acc = c1.selectbox("Debit Account", list(acc_dict.keys()))
+            dr_amt = c1.number_input("Debit Amount", min_value=0.0)
+            
+            cr_acc = c2.selectbox("Credit Account", list(acc_dict.keys()))
+            cr_amt = c2.number_input("Credit Amount", min_value=0.0)
+            
+            if st.form_submit_button("Post Journal"):
+                if dr_amt != cr_amt:
+                    st.error("Debit and Credit must be equal.")
+                elif dr_amt > 0:
+                    lines = [
+                        {'account_code': acc_dict[dr_acc], 'debit': dr_amt, 'credit': 0},
+                        {'account_code': acc_dict[cr_acc], 'debit': 0, 'credit': cr_amt}
+                    ]
+                    if post_journal_entry(j_date, j_desc, "Manual", lines):
+                        log_action("Manual Journal", f"Amt: {dr_amt}, Dr: {dr_acc}, Cr: {cr_acc}")
+                        st.success("Journal Posted Successfully")
+                        st.rerun()
+
+    with t3:
+        st.subheader("Partner Ledger (Customer/Vendor Account)")
+        contacts = run_query("SELECT id, name FROM contacts", fetch=True)
+        if not contacts.empty:
+            c_dict = dict(zip(contacts['name'], contacts['id']))
+            sel_c = st.selectbox("Select Partner", list(c_dict.keys()))
+            
+            ledger = run_query(f"""
+                SELECT e.date, e.description, e.reference, l.debit, l.credit
+                FROM journal_entries e 
+                JOIN journal_lines l ON e.id = l.entry_id
+                WHERE l.contact_id = {c_dict[sel_c]}
+                ORDER BY e.date
+            """, fetch=True)
+            
+            if not ledger.empty:
+                ledger['Balance'] = ledger['debit'].cumsum() - ledger['credit'].cumsum()
+                st.dataframe(ledger, use_container_width=True, hide_index=True)
+                st.metric("Net Balance", f"{currency} {ledger['Balance'].iloc[-1]:,.2f}")
             else:
-                cur = get_conn().cursor()
-                cur.execute("SELECT qty FROM stock WHERE product_id=?", (prod,))
-                r = cur.fetchone()
-                if r:
-                    new_qty = r[0] + adj_qty
-                    cur.execute("UPDATE stock SET qty=?, last_updated=? WHERE product_id=?", (new_qty, now_iso(), prod))
-                else:
-                    cur.execute("INSERT INTO stock (product_id, qty, last_updated) VALUES (?,?,?)", (prod, adj_qty, now_iso()))
-                get_conn().commit()
-                audit(st.session_state.user['id'], "adjust", "inventory", "stock", prod, f"Adjusted stock by {adj_qty}")
-                st.success("Stock adjusted")
-                st.experimental_rerun()
+                st.info("No transactions found for this partner.")
 
-# -------------------------
-# Sales Invoices
-# -------------------------
-elif choice == "Sales Invoices":
-    st.title("Sales Invoices")
-    st.markdown("Create and post sales invoices. Posting will reduce stock and create journal entries.")
-    partners = run_sql("SELECT id, name FROM partners WHERE partner_type='customer' ORDER BY name", fetch=True)
-    products = run_sql("SELECT id, name, sale_price FROM products ORDER BY name", fetch=True)
+elif choice == "Reporting":
+    st.title("Financial Reporting")
+    rep_type = st.radio("Select Report", ["Profit & Loss", "Balance Sheet"])
+    
+    b_df = get_account_balances()
+    
+    if rep_type == "Profit & Loss":
+        st.subheader("Profit & Loss Statement")
+        revenue = b_df[b_df['type'] == 'Revenue']['balance'].sum()
+        cogs = b_df[b_df['code'] == 5000]['balance'].sum()
+        gross_profit = revenue - cogs
+        expenses = b_df[(b_df['type'] == 'Expense') & (b_df['code'] != 5000)]['balance'].sum()
+        net_profit = gross_profit - expenses
+        
+        st.markdown(f"""
+        <div style="background:white; padding:20px; border-radius:8px; border-left:5px solid var(--secondary);">
+            <h4>Total Revenue: {currency} {revenue:,.2f}</h4>
+            <h4 style="color:red;">Cost of Goods Sold: {currency} {cogs:,.2f}</h4>
+            <h3>Gross Profit: {currency} {gross_profit:,.2f}</h3>
+            <h4 style="color:red;">Operating Expenses: {currency} {expenses:,.2f}</h4>
+            <hr>
+            <h2 style="color:var(--primary);">Net Profit: {currency} {net_profit:,.2f}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    elif rep_type == "Balance Sheet":
+        st.subheader("Balance Sheet")
+        assets = b_df[b_df['type'] == 'Asset']['balance'].sum()
+        liab = b_df[b_df['type'] == 'Liability']['balance'].sum()
+        equity = b_df[b_df['type'] == 'Equity']['balance'].sum()
+        
+        # Add current year net profit to equity
+        rev = b_df[b_df['type'] == 'Revenue']['balance'].sum()
+        exp = b_df[b_df['type'] == 'Expense']['balance'].sum()
+        current_earnings = rev - exp
+        total_equity_liab = liab + equity + current_earnings
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"### Assets")
+            st.dataframe(b_df[b_df['type'] == 'Asset'][['name', 'balance']], hide_index=True)
+            st.markdown(f"**Total Assets: {currency} {assets:,.2f}**")
+        with c2:
+            st.markdown(f"### Liabilities & Equity")
+            st.dataframe(b_df[b_df['type'].isin(['Liability', 'Equity'])][['name', 'balance']], hide_index=True)
+            st.markdown(f"Current Year Earnings: {currency} {current_earnings:,.2f}")
+            st.markdown(f"**Total Liab & Equity: {currency} {total_equity_liab:,.2f}**")
 
-    with st.expander("New Sales Invoice"):
-        with st.form("new_sale"):
-            inv_date = st.date_input("Date", value=date.today())
-            partner = st.selectbox("Customer", options=partners['id'].tolist() if not partners.empty else [], format_func=lambda x: partners[partners['id']==x]['name'].iloc[0] if not partners.empty else "")
-            # simple single-line invoice for brevity; extend to multiple lines as needed
-            prod = st.selectbox("Product", options=products['id'].tolist() if not products.empty else [], format_func=lambda x: products[products['id']==x]['name'].iloc[0] if not products.empty else "")
-            qty = st.number_input("Qty", value=1.0)
-            unit_price = st.number_input("Unit Price", value=float(products[products['id']==prod]['sale_price'].iloc[0]) if not products.empty else 0.0, format="%.2f")
-            if st.form_submit_button("Create Invoice"):
-                if partner == "" or partner is None:
-                    st.error("Add/select a customer first.")
-                else:
-                    number = next_number("INV")
-                    total = qty * unit_price
-                    run_sql("INSERT INTO invoices (number, date, partner_id, total, status, type) VALUES (?,?,?,?,?,?)",
-                            (number, inv_date.isoformat(), partner, total, "draft", "sale"))
-                    inv_id = run_sql("SELECT id FROM invoices WHERE number=?", (number,), fetch=True)['id'].iloc[0]
-                    run_sql("INSERT INTO invoice_lines (invoice_id, product_id, description, qty, unit_price, line_total) VALUES (?,?,?,?,?,?)",
-                            (inv_id, prod, "", qty, unit_price, total))
-                    audit(st.session_state.user['id'], "create", "sales", "invoice", inv_id, f"Created invoice {number}")
-                    st.success(f"Invoice {number} created (draft).")
-                    st.experimental_rerun()
-
-    st.markdown("### Draft Invoices")
-    drafts = run_sql("SELECT i.id, i.number, i.date, i.total, p.name as partner FROM invoices i LEFT JOIN partners p ON i.partner_id=p.id WHERE i.status='draft' AND i.type='sale' ORDER BY i.date DESC", fetch=True)
-    st.dataframe(drafts)
-
-    if not drafts.empty:
-        sel = st.selectbox("Select draft to Post", options=drafts['id'].tolist(), format_func=lambda x: drafts[drafts['id']==x]['number'].iloc[0])
-        if st.button("Post Selected Invoice"):
-            try:
-                post_sale_invoice(sel, st.session_state.user['id'])
-                st.success("Invoice posted: inventory and journal updated.")
-                st.experimental_rerun()
-            except Exception as e:
-                st.error(f"Error posting invoice: {e}")
-
-# -------------------------
-# Purchase Bills
-# -------------------------
-elif choice == "Purchase Bills":
-    st.title("Purchase Bills")
-    st.markdown("Create and post purchase bills. Posting will increase stock and create journal entries.")
-    partners = run_sql("SELECT id, name FROM partners WHERE partner_type='supplier' ORDER BY name", fetch=True)
-    products = run_sql("SELECT id, name, cost_price FROM products ORDER BY name", fetch=True)
-
-    with st.expander("New Purchase Bill"):
-        with st.form("new_bill"):
-            bill_date = st.date_input("Date", value=date.today())
-            supplier = st.selectbox("Supplier", options=partners['id'].tolist() if not partners.empty else [], format_func=lambda x: partners[partners['id']==x]['name'].iloc[0] if not partners.empty else "")
-            prod = st.selectbox("Product", options=products['id'].tolist() if not products.empty else [], format_func=lambda x: products[products['id']==x]['name'].iloc[0] if not products.empty else "")
-            qty = st.number_input("Qty", value=1.0)
-            unit_cost = st.number_input("Unit Cost", value=float(products[products['id']==prod]['cost_price'].iloc[0]) if not products.empty else 0.0, format="%.2f")
-            if st.form_submit_button("Create Bill"):
-                if supplier == "" or supplier is None:
-                    st.error("Add/select a supplier first.")
-                else:
-                    number = next_number("BILL")
-                    total = qty * unit_cost
-                    run_sql("INSERT INTO invoices (number, date, partner_id, total, status, type) VALUES (?,?,?,?,?,?)",
-                            (number, bill_date.isoformat(), supplier, total, "draft", "purchase"))
-                    inv_id = run_sql("SELECT id FROM invoices WHERE number=?", (number,), fetch=True)['id'].iloc[0]
-                    run_sql("INSERT INTO invoice_lines (invoice_id, product_id, description, qty, unit_price, line_total) VALUES (?,?,?,?,?,?)",
-                            (inv_id, prod, "", qty, unit_cost, total))
-                    audit(st.session_state.user['id'], "create", "purchase", "bill", inv_id, f"Created bill {number}")
-                    st.success(f"Bill {number} created (draft).")
-                    st.experimental_rerun()
-
-    st.markdown("### Draft Bills")
-    drafts = run_sql("SELECT i.id, i.number, i.date, i.total, p.name as partner FROM invoices i LEFT JOIN partners p ON i.partner_id=p.id WHERE i.status='draft' AND i.type='purchase' ORDER BY i.date DESC", fetch=True)
-    st.dataframe(drafts)
-
-    if not drafts.empty:
-        sel = st.selectbox("Select draft bill to Post", options=drafts['id'].tolist(), format_func=lambda x: drafts[drafts['id']==x]['number'].iloc[0])
-        if st.button("Post Selected Bill"):
-            try:
-                post_purchase_bill(sel, st.session_state.user['id'])
-                st.success("Bill posted: inventory and journal updated.")
-                st.experimental_rerun()
-            except Exception as e:
-                st.error(f"Error posting bill: {e}")
-
-# -------------------------
-# Journal Entries
-# -------------------------
-elif choice == "Journal Entries":
-    st.title("Journal Entries")
-    df = run_sql("""SELECT je.id, je.date, je.ref, je.narration, u.full_name as posted_by, je.posted_at
-                   FROM journal_entries je LEFT JOIN users u ON je.posted_by=u.id ORDER BY je.date DESC""", fetch=True)
-    st.dataframe(df)
-
-# -------------------------
-# Audit Log
-# -------------------------
-elif choice == "Audit Log":
-    st.title("Audit Log")
-    df = run_sql("""SELECT a.id, u.full_name as user, a.action, a.module, a.object_type, a.object_id, a.timestamp, a.details
-                    FROM audit_log a LEFT JOIN users u ON a.user_id=u.id ORDER BY a.timestamp DESC LIMIT 500""", fetch=True)
-    st.dataframe(df)
-
-# -------------------------
-# Settings
-# -------------------------
 elif choice == "Settings":
-    st.title("Settings")
-    st.subheader("Users")
-    with st.form("add_user", clear_on_submit=True):
-        uname = st.text_input("Username")
-        fname = st.text_input("Full name")
-        email = st.text_input("Email")
-        role = st.selectbox("Role", ["admin", "accountant", "sales", "purchasing", "user"])
-        pw = st.text_input("Password", type="password")
-        if st.form_submit_button("Create User"):
-            if not uname or not pw:
-                st.error("Username and password required")
-            else:
-                run_sql("INSERT INTO users (username, full_name, email, password_hash, role) VALUES (?,?,?,?,?)",
-                        (uname, fname, email, hash_pw(pw), role))
-                st.success("User created")
-                st.experimental_rerun()
-    st.dataframe(run_sql("SELECT id, username, full_name, email, role, active FROM users ORDER BY username", fetch=True))
+    st.title("System Settings")
+    
+    with st.expander("Company Settings", expanded=True):
+        with st.form("settings_form"):
+            new_comp = st.text_input("Company Name", value=company_name)
+            new_curr = st.text_input("Currency Symbol", value=currency)
+            if st.form_submit_button("Update Details"):
+                run_query("UPDATE settings SET value=? WHERE key='company_name'", (new_comp,))
+                run_query("UPDATE settings SET value=? WHERE key='currency'", (new_curr,))
+                log_action("Updated Settings", "Company Details")
+                st.success("Settings updated! Please refresh the page.")
+                
+    with st.expander("User Management"):
+        users = run_query("SELECT id, username, role FROM users", fetch=True)
+        st.dataframe(users, hide_index=True)
+        st.markdown("**Add New User**")
+        with st.form("add_user"):
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            r = st.selectbox("Role", ["Admin", "User"])
+            if st.form_submit_button("Create User"):
+                try:
+                    run_query("INSERT INTO users (username, password, role) VALUES (?,?,?)", (u, hash_password(p), r))
+                    log_action("Created User", f"Username: {u}")
+                    st.success("User created.")
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("Username already exists!")
 
-# -------------------------
-# End of file
-# -------------------------
+    with st.expander("System Logs"):
+        logs = run_query("SELECT * FROM audit_logs ORDER BY id DESC", fetch=True)
+        st.dataframe(logs, use_container_width=True, hide_index=True)

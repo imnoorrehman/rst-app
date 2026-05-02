@@ -7,18 +7,15 @@ from datetime import datetime
 def init_db():
     conn = sqlite3.connect('rst_business.db')
     c = conn.cursor()
-    # Updated Tables
     c.execute('CREATE TABLE IF NOT EXISTS parties (id INTEGER PRIMARY KEY, name TEXT, type TEXT, contact TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, item_name TEXT, qty_kg REAL, rate_per_kg REAL)')
     c.execute('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY, date TEXT, party_name TEXT, description TEXT, debit REAL, credit REAL, account_type TEXT, category TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, account_name TEXT, balance REAL, type TEXT)')
     
-    # Initialize Default Accounts if empty
     c.execute("SELECT count(*) FROM accounts")
     if c.fetchone()[0] == 0:
         default_accounts = [('Cash', 0, 'Asset'), ('Bank', 0, 'Asset'), ('Capital Account', 0, 'Equity')]
         c.executemany("INSERT INTO accounts (account_name, balance, type) VALUES (?,?,?)", default_accounts)
-    
     conn.commit()
     conn.close()
 
@@ -29,100 +26,165 @@ def run_query(query, params=(), fetch=False):
         if fetch: return pd.read_sql(query, conn, params=params)
         conn.execute(query, params); conn.commit()
 
-# --- UI LOOK & FEEL ---
-st.set_page_config(page_title="RST Pro Manager", layout="wide")
+# --- FRESHBOOKS LOOK & FEEL (LOCKED DESIGN) ---
+st.set_page_config(page_title="RST | Rehman Scrap Trader", layout="wide")
+
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    [data-testid="stSidebar"] { background-color: #1e293b; color: white; }
+    :root {
+        --fb-blue: #0075dd;
+        --fb-green: #00a85d;
+        --fb-slate: #2d3e50;
+        --fb-bg: #f4f7f9;
+    }
+
+    .stApp { background-color: var(--fb-bg); }
+
+    section[data-testid="stSidebar"] {
+        background-color: var(--fb-slate) !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #ffffff !important;
+    }
+
+    div[data-testid="stMetric"] {
+        background-color: white;
+        border: 1px solid #e1e8ed;
+        border-radius: 12px;
+        padding: 20px !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+    }
+
+    .stButton>button {
+        background-color: var(--fb-blue);
+        color: white;
+        border-radius: 6px;
+        border: none;
+        padding: 10px 24px;
+        font-weight: 600;
+    }
+    
+    h1, h2, h3 {
+        color: var(--fb-slate);
+        font-family: 'Segoe UI', sans-serif;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # --- SIDEBAR NAVIGATION ---
-st.sidebar.title("🛠 RST Operations")
-menu = ["📊 Financial Dashboard", "💰 Cash & Bank", "🤝 Parties & Capital", "📦 Inventory & Sales"]
-choice = st.sidebar.selectbox("Go to:", menu)
+st.sidebar.markdown("### RST TRADER")
+st.sidebar.markdown("---")
 
-# --- 1. FINANCIAL DASHBOARD ---
-if choice == "📊 Financial Dashboard":
-    st.title("Financial Overview")
+search_term = st.sidebar.text_input("Global Search", placeholder="Find Invoices or Names")
+
+menu = ["Dashboard", "Cash and Bank", "Parties and Capital", "Inventory and Sales"]
+choice = st.sidebar.radio("Navigation Menu", menu)
+
+# --- UNIVERSAL SEARCH LOGIC ---
+if search_term:
+    st.markdown(f"### Search Results: {search_term}")
+    found = False
+    for table in ["parties", "transactions", "inventory", "accounts"]:
+        df = run_query(f"SELECT * FROM {table}", fetch=True)
+        if not df.empty:
+            mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False)).any(axis=1)
+            res = df[mask]
+            if not res.empty:
+                st.write(f"Matches in {table.title()}")
+                st.dataframe(res, use_container_width=True)
+                found = True
+    if not found: st.info("No matching records found.")
+    st.markdown("---")
+
+# --- 1. DASHBOARD ---
+if choice == "Dashboard":
+    st.title("Business Overview")
     
-    # Financial Logic
-    sales = run_query("SELECT SUM(debit) FROM transactions WHERE category='Sale'", fetch=True).iloc[0,0] or 0
-    expenses = run_query("SELECT SUM(credit) FROM transactions WHERE category='Expense'", fetch=True).iloc[0,0] or 0
-    cash_bal = run_query("SELECT balance FROM accounts WHERE account_name='Cash'", fetch=True).iloc[0,0] or 0
-    bank_bal = run_query("SELECT balance FROM accounts WHERE account_name='Bank'", fetch=True).iloc[0,0] or 0
-    capital = run_query("SELECT balance FROM accounts WHERE account_name='Capital Account'", fetch=True).iloc[0,0] or 0
+    def get_val(query):
+        val = run_query(query, fetch=True).iloc[0,0]
+        return float(val) if val is not None else 0.0
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Cash in Hand", f"Rs. {cash_bal:,.0f}")
-    col2.metric("Bank Balance", f"Rs. {bank_bal:,.0f}")
-    col3.metric("Net Profit", f"Rs. {(sales - expenses):,.0f}")
-    col4.metric("Owner's Equity", f"Rs. {capital:,.0f}")
+    sales = get_val("SELECT SUM(debit) FROM transactions WHERE category='Sale'")
+    expenses = get_val("SELECT SUM(credit) FROM transactions WHERE category='Expense'")
+    cash = get_val("SELECT balance FROM accounts WHERE account_name='Cash'")
+    bank = get_val("SELECT balance FROM accounts WHERE account_name='Bank'")
 
-    st.subheader("Balance Sheet Summary")
-    bs_data = {
-        "Assets": ["Cash", "Bank", "Inventory Value"],
-        "Amount": [cash_bal, bank_bal, (run_query("SELECT SUM(qty_kg * rate_per_kg) FROM inventory", fetch=True).iloc[0,0] or 0)]
-    }
-    st.table(pd.DataFrame(bs_data))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Revenue", f"Rs. {sales:,.0f}")
+    c2.metric("Total Expenses", f"Rs. {expenses:,.0f}")
+    c3.metric("Net Profit", f"Rs. {(sales - expenses):,.0f}")
 
-# --- 2. CASH & BANK ---
-elif choice == "💰 Cash & Bank":
-    st.title("Cash & Bank Management")
-    
-    tab1, tab2 = st.tabs(["Record Transaction", "Account History"])
-    
-    with tab1:
-        with st.form("cash_form"):
-            t_type = st.selectbox("Transaction Type", ["Capital Injection", "Expense Payment", "Bank Transfer"])
-            from_acc = st.selectbox("From/To Account", ["Cash", "Bank", "Capital Account"])
-            amount = st.number_input("Amount (PKR)", min_value=0.0)
+    st.markdown("### Liquidity Status")
+    c1, c2 = st.columns(2)
+    c1.metric("Cash in Hand", f"Rs. {cash:,.0f}")
+    c2.metric("Bank Balance", f"Rs. {bank:,.0f}")
+
+# --- 2. CASH AND BANK ---
+elif choice == "Cash and Bank":
+    st.title("Banking and Capital")
+    with st.container():
+        st.markdown('<div style="background-color:white; padding:25px; border-radius:12px; border:1px solid #e1e8ed;">', unsafe_allow_html=True)
+        with st.form("bank_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            t_type = col1.selectbox("Transaction Type", ["Capital Injection", "Expense Payment"])
+            target = col2.selectbox("Account", ["Cash", "Bank"])
+            amt = st.number_input("Amount (PKR)", min_value=0.0)
             note = st.text_input("Remarks")
-            if st.form_submit_button("Record"):
+            if st.form_submit_button("Record Transaction"):
                 if t_type == "Capital Injection":
-                    run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = ?", (amount, from_acc))
-                    run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = 'Capital Account'", (amount,))
-                elif t_type == "Expense Payment":
-                    run_query("UPDATE accounts SET balance = balance - ? WHERE account_name = ?", (amount, from_acc))
+                    run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = ?", (amt, target))
+                    run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = 'Capital Account'", (amt,))
+                else:
+                    run_query("UPDATE accounts SET balance = balance - ? WHERE account_name = ?", (amt, target))
                     run_query("INSERT INTO transactions (date, description, credit, category) VALUES (?,?,?,?)", 
-                              (datetime.now().date(), note, amount, "Expense"))
-                st.success("Accounts Updated Successfully!")
+                              (datetime.now().date(), note, amt, "Expense"))
+                st.success("Ledger updated successfully")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# --- 3. PARTIES & CAPITAL ---
-elif choice == "🤝 Parties & Capital":
-    st.title("Parties Master Data")
-    name = st.text_input("Party Name")
-    p_type = st.selectbox("Type", ["Customer", "Vendor"])
-    if st.button("Add Party"):
-        run_query("INSERT INTO parties (name, type) VALUES (?,?)", (name, p_type))
-        st.success(f"{name} added!")
+# --- 3. PARTIES AND CAPITAL ---
+elif choice == "Parties and Capital":
+    st.title("Contacts and Parties")
+    with st.expander("Add New Contact"):
+        with st.form("add_p"):
+            n = st.text_input("Name")
+            t = st.selectbox("Type", ["Customer", "Vendor"])
+            if st.form_submit_button("Save"):
+                run_query("INSERT INTO parties (name, type) VALUES (?,?)", (n, t))
     
+    st.subheader("Directory")
     st.dataframe(run_query("SELECT * FROM parties", fetch=True), use_container_width=True)
 
-# --- 4. INVENTORY & SALES ---
-elif choice == "📦 Inventory & Sales":
-    st.title("Inventory & Sales")
-    # Quick Inventory View
-    df_inv = run_query("SELECT * FROM inventory", fetch=True)
-    st.dataframe(df_inv, use_container_width=True)
+# --- 4. INVENTORY AND SALES ---
+elif choice == "Inventory and Sales":
+    st.title("Inventory and Sales")
     
-    with st.expander("Record New Sale"):
-        cust = st.selectbox("Customer", run_query("SELECT name FROM parties WHERE type='Customer'", fetch=True))
-        item = st.selectbox("Item", df_inv['item_name'].tolist() if not df_inv.empty else ["No Items"])
-        s_qty = st.number_input("Qty (KG)", min_value=0.0)
-        s_rate = st.number_input("Rate", min_value=0.0)
-        pay_method = st.selectbox("Payment Received In", ["Cash", "Bank", "Pending/Credit"])
+    tab1, tab2 = st.tabs(["Inventory", "Sales"])
+    
+    with tab1:
+        with st.expander("Add Stock Item"):
+            it = st.text_input("Item Name")
+            iq = st.number_input("Quantity", min_value=0.0)
+            ir = st.number_input("Rate", min_value=0.0)
+            if st.button("Save Item"):
+                run_query("INSERT INTO inventory (item_name, qty_kg, rate_per_kg) VALUES (?,?,?)", (it, iq, ir))
+        st.dataframe(run_query("SELECT * FROM inventory", fetch=True), use_container_width=True)
+
+    with tab2:
+        df_inv = run_query("SELECT * FROM inventory", fetch=True)
+        customers = run_query("SELECT name FROM parties WHERE type='Customer'", fetch=True)
         
-        if st.button("Finalize Sale"):
-            total = s_qty * s_rate
-            # 1. Deduct Stock
-            run_query("UPDATE inventory SET qty_kg = qty_kg - ? WHERE item_name = ?", (s_qty, item))
-            # 2. Record Transaction
-            run_query("INSERT INTO transactions (date, party_name, description, debit, category) VALUES (?,?,?,?,?)",
-                      (datetime.now().date(), cust, f"Sale: {item}", total, "Sale"))
-            # 3. Update Cash/Bank
-            if pay_method != "Pending/Credit":
-                run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = ?", (total, pay_method))
-            st.success("Sale completed!")
+        if not df_inv.empty and not customers.empty:
+            with st.form("sale_f"):
+                c = st.selectbox("Customer", customers['name'].tolist())
+                i = st.selectbox("Item", df_inv['item_name'].tolist())
+                q = st.number_input("Quantity", min_value=0.1)
+                r = st.number_input("Price", min_value=1.0)
+                p = st.selectbox("Payment Method", ["Cash", "Bank", "Credit"])
+                if st.form_submit_button("Record Sale"):
+                    total = q * r
+                    run_query("UPDATE inventory SET qty_kg = qty_kg - ? WHERE item_name = ?", (q, i))
+                    run_query("INSERT INTO transactions (date, party_name, description, debit, category) VALUES (?,?,?,?,?)",
+                              (datetime.now().date(), c, f"Sold {i}", total, "Sale"))
+                    if p != "Credit":
+                        run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = ?", (total, p))
+                    st.success(f"Transaction of Rs.{total:,.0f} complete")

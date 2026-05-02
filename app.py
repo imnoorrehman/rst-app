@@ -2,26 +2,23 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
-from fpdf import FPDF
-import os
 
 # --- DATABASE INITIALIZATION ---
 def init_db():
     conn = sqlite3.connect('rst_business.db')
     c = conn.cursor()
-    # Parties Master
-    c.execute('''CREATE TABLE IF NOT EXISTS parties 
-                 (id INTEGER PRIMARY KEY, name TEXT, type TEXT, contact TEXT)''')
-    # Inventory
-    c.execute('''CREATE TABLE IF NOT EXISTS inventory 
-                 (id INTEGER PRIMARY KEY, item_name TEXT, qty_kg REAL, rate_per_kg REAL)''')
-    # Transactions (The Ledger)
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions 
-                 (id INTEGER PRIMARY KEY, date TEXT, party_name TEXT, description TEXT, 
-                  debit REAL, credit REAL, account_type TEXT)''')
-    # Expenses
-    c.execute('''CREATE TABLE IF NOT EXISTS expenses 
-                 (id INTEGER PRIMARY KEY, date TEXT, category TEXT, amount REAL, method TEXT)''')
+    # Updated Tables
+    c.execute('CREATE TABLE IF NOT EXISTS parties (id INTEGER PRIMARY KEY, name TEXT, type TEXT, contact TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, item_name TEXT, qty_kg REAL, rate_per_kg REAL)')
+    c.execute('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY, date TEXT, party_name TEXT, description TEXT, debit REAL, credit REAL, account_type TEXT, category TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, account_name TEXT, balance REAL, type TEXT)')
+    
+    # Initialize Default Accounts if empty
+    c.execute("SELECT count(*) FROM accounts")
+    if c.fetchone()[0] == 0:
+        default_accounts = [('Cash', 0, 'Asset'), ('Bank', 0, 'Asset'), ('Capital Account', 0, 'Equity')]
+        c.executemany("INSERT INTO accounts (account_name, balance, type) VALUES (?,?,?)", default_accounts)
+    
     conn.commit()
     conn.close()
 
@@ -29,107 +26,103 @@ init_db()
 
 def run_query(query, params=(), fetch=False):
     with sqlite3.connect('rst_business.db') as conn:
-        if fetch:
-            return pd.read_sql(query, conn, params=params)
-        conn.execute(query, params)
-        conn.commit()
+        if fetch: return pd.read_sql(query, conn, params=params)
+        conn.execute(query, params); conn.commit()
 
-# --- UI LOGIC ---
-st.set_page_config(page_title="RST Business Manager", layout="wide")
+# --- UI LOOK & FEEL ---
+st.set_page_config(page_title="RST Pro Manager", layout="wide")
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    [data-testid="stSidebar"] { background-color: #1e293b; color: white; }
+    </style>
+""", unsafe_allow_html=True)
 
-# 1. UNIVERSAL SEARCH BAR
-st.sidebar.title("🔍 Global Search")
-search_term = st.sidebar.text_input("Find anything (Bill, Party, Amount)...")
+# --- SIDEBAR NAVIGATION ---
+st.sidebar.title("🛠 RST Operations")
+menu = ["📊 Financial Dashboard", "💰 Cash & Bank", "🤝 Parties & Capital", "📦 Inventory & Sales"]
+choice = st.sidebar.selectbox("Go to:", menu)
 
-if search_term:
-    st.header(f"Search Results for: '{search_term}'")
-    tables = ["parties", "transactions", "inventory", "expenses"]
-    for table in tables:
-        results = run_query(f"SELECT * FROM {table} WHERE LOWER(CAST(id AS TEXT) || ' ' || printf('%s', (SELECT group_concat(name) FROM pragma_table_info('{table}'))) || ' ' || *) LIKE ?", 
-                            (f'%{search_term.lower()}%',), fetch=True)
-        if not results.empty:
-            st.subheader(f"Results in {table.capitalize()}")
-            st.dataframe(results, use_container_width=True)
-
-# --- NAVIGATION ---
-menu = ["Dashboard", "Sales Module", "Expenses & Purchases", "Parties Master", "Inventory"]
-choice = st.sidebar.selectbox("Navigation", menu)
-
-# 2. DASHBOARD & REPORTS
-if choice == "Dashboard":
-    st.title("📊 RST Financial Dashboard")
+# --- 1. FINANCIAL DASHBOARD ---
+if choice == "📊 Financial Dashboard":
+    st.title("Financial Overview")
     
-    # Metrics Calculation
-    sales = run_query("SELECT SUM(debit) FROM transactions WHERE account_type='Sale'", fetch=True).iloc[0,0] or 0
-    exp = run_query("SELECT SUM(amount) FROM expenses", fetch=True).iloc[0,0] or 0
-    purchases = run_query("SELECT SUM(credit) FROM transactions WHERE account_type='Purchase'", fetch=True).iloc[0,0] or 0
-    net_profit = sales - exp - purchases
+    # Financial Logic
+    sales = run_query("SELECT SUM(debit) FROM transactions WHERE category='Sale'", fetch=True).iloc[0,0] or 0
+    expenses = run_query("SELECT SUM(credit) FROM transactions WHERE category='Expense'", fetch=True).iloc[0,0] or 0
+    cash_bal = run_query("SELECT balance FROM accounts WHERE account_name='Cash'", fetch=True).iloc[0,0] or 0
+    bank_bal = run_query("SELECT balance FROM accounts WHERE account_name='Bank'", fetch=True).iloc[0,0] or 0
+    capital = run_query("SELECT balance FROM accounts WHERE account_name='Capital Account'", fetch=True).iloc[0,0] or 0
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Sales (Revenue)", f"PKR {sales:,.2f}")
-    col2.metric("Total Expenses", f"PKR {exp:,.2f}", delta_color="inverse")
-    col3.metric("Net Profit", f"PKR {net_profit:,.2f}")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Cash in Hand", f"Rs. {cash_bal:,.0f}")
+    col2.metric("Bank Balance", f"Rs. {bank_bal:,.0f}")
+    col3.metric("Net Profit", f"Rs. {(sales - expenses):,.0f}")
+    col4.metric("Owner's Equity", f"Rs. {capital:,.0f}")
 
-    st.divider()
-    st.subheader("Recent Transactions")
-    st.table(run_query("SELECT * FROM transactions ORDER BY id DESC LIMIT 5", fetch=True))
+    st.subheader("Balance Sheet Summary")
+    bs_data = {
+        "Assets": ["Cash", "Bank", "Inventory Value"],
+        "Amount": [cash_bal, bank_bal, (run_query("SELECT SUM(qty_kg * rate_per_kg) FROM inventory", fetch=True).iloc[0,0] or 0)]
+    }
+    st.table(pd.DataFrame(bs_data))
 
-# 3. SALES MODULE (The Auto-Update Engine)
-elif choice == "Sales Module":
-    st.title("📝 Record New Sale")
+# --- 2. CASH & BANK ---
+elif choice == "💰 Cash & Bank":
+    st.title("Cash & Bank Management")
     
-    parties = run_query("SELECT name FROM parties WHERE type='Customer'", fetch=True)['name'].tolist()
-    items = run_query("SELECT item_name FROM inventory", fetch=True)['item_name'].tolist()
+    tab1, tab2 = st.tabs(["Record Transaction", "Account History"])
     
-    with st.form("sale_form"):
-        party = st.selectbox("Select Customer", parties)
-        item = st.selectbox("Select Item", items)
-        qty = st.number_input("Quantity (KG)", min_value=0.1)
-        rate = st.number_input("Rate per KG (PKR)", min_value=1.0)
-        total = qty * rate
-        submitted = st.form_submit_button("Complete Sale & Update Ledger")
-        
-        if submitted:
-            # 1. Update Inventory
-            run_query("UPDATE inventory SET qty_kg = qty_kg - ? WHERE item_name = ?", (qty, item))
-            # 2. Update Ledger
-            run_query("INSERT INTO transactions (date, party_name, description, debit, credit, account_type) VALUES (?,?,?,?,?,?)",
-                      (datetime.now().strftime("%Y-%m-%d"), party, f"Sale of {item}", total, 0, "Sale"))
-            st.success(f"Sale recorded! Inventory updated and PKR {total} added to {party} outstanding.")
+    with tab1:
+        with st.form("cash_form"):
+            t_type = st.selectbox("Transaction Type", ["Capital Injection", "Expense Payment", "Bank Transfer"])
+            from_acc = st.selectbox("From/To Account", ["Cash", "Bank", "Capital Account"])
+            amount = st.number_input("Amount (PKR)", min_value=0.0)
+            note = st.text_input("Remarks")
+            if st.form_submit_button("Record"):
+                if t_type == "Capital Injection":
+                    run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = ?", (amount, from_acc))
+                    run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = 'Capital Account'", (amount,))
+                elif t_type == "Expense Payment":
+                    run_query("UPDATE accounts SET balance = balance - ? WHERE account_name = ?", (amount, from_acc))
+                    run_query("INSERT INTO transactions (date, description, credit, category) VALUES (?,?,?,?)", 
+                              (datetime.now().date(), note, amount, "Expense"))
+                st.success("Accounts Updated Successfully!")
 
-# 4. PARTIES MASTER
-elif choice == "Parties Master":
-    st.title("👥 Party Management")
-    with st.expander("Add New Party"):
-        name = st.text_input("Party Name")
-        p_type = st.selectbox("Type", ["Customer", "Vendor"])
-        contact = st.text_input("Contact Info")
-        if st.button("Save Party"):
-            run_query("INSERT INTO parties (name, type, contact) VALUES (?,?,?)", (name, p_type, contact))
-            st.rerun()
+# --- 3. PARTIES & CAPITAL ---
+elif choice == "🤝 Parties & Capital":
+    st.title("Parties Master Data")
+    name = st.text_input("Party Name")
+    p_type = st.selectbox("Type", ["Customer", "Vendor"])
+    if st.button("Add Party"):
+        run_query("INSERT INTO parties (name, type) VALUES (?,?)", (name, p_type))
+        st.success(f"{name} added!")
     
     st.dataframe(run_query("SELECT * FROM parties", fetch=True), use_container_width=True)
 
-# 5. EXPENSES
-elif choice == "Expenses & Purchases":
-    st.title("💸 Expense & Cash Book")
-    with st.form("exp_form"):
-        cat = st.selectbox("Category", ["Rent", "Electricity", "Labor", "Purchase", "Other"])
-        amt = st.number_input("Amount (PKR)")
-        method = st.selectbox("Payment Method", ["Cash", "Bank Transfer", "Cheque"])
-        if st.form_submit_button("Record Expense"):
-            run_query("INSERT INTO expenses (date, category, amount, method) VALUES (?,?,?,?)",
-                      (datetime.now().strftime("%Y-%m-%d"), cat, amt, method))
-            st.success("Expense deducted from Cash/Bank summary.")
-
-# 6. INVENTORY
-elif choice == "Inventory":
-    st.title("📦 Stock Control")
-    # Quick Inventory Add (For initial setup)
-    with st.expander("Add New Item Stock"):
-        i_name = st.text_input("Item Name")
-        i_qty = st.number_input("Initial Qty", min_value=0.0)
-        if st.button("Add Item"):
-            run_query("INSERT INTO inventory (item_name, qty_kg, rate_per_kg) VALUES (?,?,0)", (i_name, i_qty))
+# --- 4. INVENTORY & SALES ---
+elif choice == "📦 Inventory & Sales":
+    st.title("Inventory & Sales")
+    # Quick Inventory View
+    df_inv = run_query("SELECT * FROM inventory", fetch=True)
+    st.dataframe(df_inv, use_container_width=True)
     
-    st.dataframe(run_query("SELECT * FROM inventory", fetch=True), use_container_width=True)
+    with st.expander("Record New Sale"):
+        cust = st.selectbox("Customer", run_query("SELECT name FROM parties WHERE type='Customer'", fetch=True))
+        item = st.selectbox("Item", df_inv['item_name'].tolist() if not df_inv.empty else ["No Items"])
+        s_qty = st.number_input("Qty (KG)", min_value=0.0)
+        s_rate = st.number_input("Rate", min_value=0.0)
+        pay_method = st.selectbox("Payment Received In", ["Cash", "Bank", "Pending/Credit"])
+        
+        if st.button("Finalize Sale"):
+            total = s_qty * s_rate
+            # 1. Deduct Stock
+            run_query("UPDATE inventory SET qty_kg = qty_kg - ? WHERE item_name = ?", (s_qty, item))
+            # 2. Record Transaction
+            run_query("INSERT INTO transactions (date, party_name, description, debit, category) VALUES (?,?,?,?,?)",
+                      (datetime.now().date(), cust, f"Sale: {item}", total, "Sale"))
+            # 3. Update Cash/Bank
+            if pay_method != "Pending/Credit":
+                run_query("UPDATE accounts SET balance = balance + ? WHERE account_name = ?", (total, pay_method))
+            st.success("Sale completed!")

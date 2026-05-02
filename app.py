@@ -311,36 +311,51 @@ st.markdown("""
 if 'user' not in st.session_state:
     st.session_state.user = None
 
-# --- Authentication ---
+# ---------- Authentication helpers ----------
 def login_ui():
     st.sidebar.subheader("Sign in")
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
-    if st.sidebar.button("Login"):
+    username = st.sidebar.text_input("Username", key="login_username")
+    password = st.sidebar.text_input("Password", type="password", key="login_password")
+    if st.sidebar.button("Login", key="login_button"):
         df = run_sql("SELECT id, username, full_name, role, password_hash FROM users WHERE username=?", (username,), fetch=True)
         if not df.empty and hash_pw(password) == df['password_hash'].iloc[0]:
+            # set session state only; do NOT call st.experimental_rerun() here
             st.session_state.user = dict(df.iloc[0])
             audit(st.session_state.user['id'], "login", "auth", "user", st.session_state.user['id'], "User logged in")
-            st.experimental_rerun()
+            st.sidebar.success(f"Welcome {st.session_state.user['full_name']}")
+            # mark that we should rerun once after returning
+            st.session_state._just_logged_in = True
         else:
             st.sidebar.error("Invalid credentials")
 
 def logout_ui():
-    if st.sidebar.button("Logout"):
+    if st.sidebar.button("Logout", key="logout_button"):
         if st.session_state.user:
             audit(st.session_state.user['id'], "logout", "auth", "user", st.session_state.user['id'], "User logged out")
         st.session_state.user = None
         st.experimental_rerun()
 
+# ---------- Main auth flow (top of your script) ----------
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if '_just_logged_in' not in st.session_state:
+    st.session_state._just_logged_in = False
+
+# show login UI if not logged in
 if not st.session_state.user:
     login_ui()
     st.sidebar.markdown("Default admin credentials: **admin / admin**")
     st.title("Modoo — Mini Odoo (Login required)")
     st.info("Please login to access modules.")
+    # if login_ui set the flag, rerun once to refresh the app into logged-in state
+    if st.session_state._just_logged_in:
+        st.session_state._just_logged_in = False
+        st.experimental_rerun()
     st.stop()
 else:
     st.sidebar.write(f"**{st.session_state.user['full_name']}** — {st.session_state.user['role']}")
     logout_ui()
+
 
 # Sidebar modules (Odoo-like)
 modules = [

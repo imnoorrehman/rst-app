@@ -3,19 +3,19 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 from fpdf import FPDF
-import base64
 
 # --- DATABASE ARCHITECTURE ---
 def init_db():
-    conn = sqlite3.connect('rst_manager_v2.db')
+    conn = sqlite3.connect('rst_manager_v3.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS accounts 
                  (code INTEGER PRIMARY KEY, name TEXT, category TEXT, balance REAL)''')
     c.execute('CREATE TABLE IF NOT EXISTS parties (id INTEGER PRIMARY KEY, name TEXT, type TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, item_name TEXT, qty REAL, unit_price REAL)')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions 
-                 (id PRIMARY KEY, date TEXT, account_name TEXT, description TEXT, 
-                  debit REAL, credit REAL, voucher_type TEXT, reference TEXT)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, account_name TEXT, 
+                  party_name TEXT, description TEXT, debit REAL, credit REAL, 
+                  voucher_type TEXT, reference TEXT)''')
 
     c.execute("SELECT count(*) FROM accounts")
     if c.fetchone()[0] == 0:
@@ -33,31 +33,17 @@ def init_db():
 init_db()
 
 def run_query(query, params=(), fetch=False):
-    with sqlite3.connect('rst_manager_v2.db') as conn:
+    with sqlite3.connect('rst_manager_v3.db') as conn:
         if fetch: return pd.read_sql(query, conn, params=params)
         conn.execute(query, params); conn.commit()
 
-def post_transaction(date, acc, desc, dr, cr, vtype, ref):
-    run_query("INSERT INTO transactions (date, account_name, description, debit, credit, voucher_type, reference) VALUES (?,?,?,?,?,?,?)",
-              (date, acc, desc, dr, cr, vtype, ref))
+def post_transaction(date, acc, party, desc, dr, cr, vtype, ref):
+    run_query("""INSERT INTO transactions 
+                 (date, account_name, party_name, description, debit, credit, voucher_type, reference) 
+                 VALUES (?,?,?,?,?,?,?,?)""",
+              (date, acc, party, desc, dr, cr, vtype, ref))
     if dr > 0: run_query("UPDATE accounts SET balance = balance + ? WHERE name = ?", (dr, acc))
     if cr > 0: run_query("UPDATE accounts SET balance = balance - ? WHERE name = ?", (cr, acc))
-
-# --- PDF GENERATOR FUNCTION ---
-def create_pdf(invoice_data):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, "SALE INVOICE - REHMAN SCRAP TRADER", ln=True, align='C')
-    pdf.set_font("Arial", '', 12)
-    pdf.cell(200, 10, f"Date: {invoice_data['date']}", ln=True)
-    pdf.cell(200, 10, f"Customer: {invoice_data['customer']}", ln=True)
-    pdf.line(10, 40, 200, 40)
-    pdf.cell(100, 10, "Description", border=1)
-    pdf.cell(40, 10, "Amount", border=1, ln=True)
-    pdf.cell(100, 10, invoice_data['desc'], border=1)
-    pdf.cell(40, 10, f"{invoice_data['amount']:,.2f}", border=1, ln=True)
-    return pdf.output(dest='S').encode('latin-1')
 
 # --- UI DESIGN (WAVE STYLE) ---
 st.set_page_config(page_title="RST Manager", layout="wide")
@@ -67,79 +53,109 @@ st.markdown("""
     .stApp { background-color: var(--wave-bg); }
     section[data-testid="stSidebar"] { background-color: #ffffff !important; border-right: 1px solid #e3e9ed; }
     .stButton>button { background-color: var(--wave-green); color: white; border-radius: 4px; border:none; }
+    h1, h2, h3 { color: var(--wave-navy); font-family: sans-serif; }
     </style>
 """, unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 st.sidebar.title("Manager.io")
-menu = ["Summary", "Bank and Cash", "Receipts", "Payments", "Inter Account Transfer", "Customers", "Sales Invoices", "Suppliers", "Purchase Invoices", "Inventory"]
+menu = ["Summary", "P&L Statement", "Partner Ledger", "Bank and Cash", "Receipts", "Payments", "Sales Invoices", "Inventory", "Contacts"]
 choice = st.sidebar.radio("Navigate", menu)
 
-# --- MODULES ---
+# --- 1. SUMMARY ---
 if choice == "Summary":
     st.title("Summary")
     df = run_query("SELECT name, category, balance FROM accounts", fetch=True)
     c1, c2 = st.columns(2)
-    c1.subheader("Assets")
-    c1.table(df[df['category'] == 'Asset'])
-    c2.subheader("Liabilities & Equity")
-    c2.table(df[df['category'].isin(['Liability', 'Equity'])])
+    with c1:
+        st.subheader("Assets")
+        st.table(df[df['category'] == 'Asset'].rename(columns={'name':'Account','balance':'Balance'}))
+    with c2:
+        st.subheader("Liabilities & Equity")
+        st.table(df[df['category'].isin(['Liability', 'Equity'])])
 
-elif choice == "Bank and Cash":
-    st.title("Bank and Cash Accounts")
-    st.dataframe(run_query("SELECT name as Account, balance as Balance FROM accounts WHERE name IN ('Cash on Hand', 'Bank Account')", fetch=True), use_container_width=True, hide_index=True)
+# --- 2. PROFIT & LOSS (P&L) ---
+elif choice == "P&L Statement":
+    st.title("Profit and Loss Statement")
+    df = run_query("SELECT name, category, balance FROM accounts", fetch=True)
+    
+    income = df[df['category'] == 'Income']['balance'].sum() * -1 # Income usually has credit balance
+    expenses = df[df['category'] == 'Expense']['balance'].sum()
+    net_profit = income - expenses
 
+    st.markdown(f"""
+    <div style="background:white; padding:20px; border-radius:8px; border:1px solid #e3e9ed;">
+        <h3>Net Profit: Rs. {net_profit:,.2f}</h3>
+        <p>Total Revenue: Rs. {income:,.2f}</p>
+        <p>Total Expenses: Rs. {expenses:,.2f}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.subheader("Details")
+    st.write("**Revenue Accounts**")
+    st.table(df[df['category'] == 'Income'])
+    st.write("**Expense Accounts**")
+    st.table(df[df['category'] == 'Expense'])
+
+# --- 3. PARTNER LEDGER ---
+elif choice == "Partner Ledger":
+    st.title("Partner Ledger")
+    parties = run_query("SELECT name FROM parties", fetch=True)['name'].tolist()
+    
+    if parties:
+        selected_party = st.selectbox("Select Partner (Customer/Supplier)", parties)
+        ledger = run_query("""SELECT date, description, voucher_type, debit, credit 
+                             FROM transactions WHERE party_name = ?""", (selected_party,), fetch=True)
+        
+        if not ledger.empty:
+            ledger['Balance'] = ledger['debit'].cumsum() - ledger['credit'].cumsum()
+            st.dataframe(ledger.rename(columns={'date':'Date','description':'Description','debit':'Dr','credit':'Cr'}), 
+                         use_container_width=True, hide_index=True)
+            st.metric(f"Current Balance for {selected_party}", f"Rs. {ledger['Balance'].iloc[-1]:,.2f}")
+        else:
+            st.info("No transactions found for this partner.")
+    else:
+        st.warning("No parties found. Add a Customer or Supplier first.")
+
+# --- 4. RECEIPTS ---
 elif choice == "Receipts":
     st.title("Receipts")
+    parties = run_query("SELECT name FROM parties", fetch=True)['name'].tolist()
     with st.expander("New Receipt"):
         with st.form("rec_f"):
             d = st.date_input("Date")
-            acc = st.selectbox("Paid Into", ["Cash on Hand", "Bank Account"])
-            party = st.text_input("Received From")
+            acc = st.selectbox("Received In", ["Cash on Hand", "Bank Account"])
+            party = st.selectbox("Received From", parties) if parties else st.text_input("Received From")
             amt = st.number_input("Amount", min_value=0.0)
-            if st.form_submit_button("Save"):
-                post_transaction(d, acc, f"Receipt: {party}", amt, 0, "Receipt", party)
-                post_transaction(d, "Sales", f"Receipt: {party}", 0, amt, "Receipt", party)
+            if st.form_submit_button("Save Receipt"):
+                post_transaction(d, acc, party, f"Receipt from {party}", amt, 0, "Receipt", "REC-001")
+                post_transaction(d, "Accounts Receivable", party, f"Payment received", 0, amt, "Receipt", "REC-001")
+                st.success("Receipt Posted")
                 st.rerun()
-    st.dataframe(run_query("SELECT * FROM transactions WHERE voucher_type='Receipt'", fetch=True), hide_index=True)
 
-elif choice == "Payments":
-    st.title("Payments")
-    with st.expander("New Payment"):
-        with st.form("pay_f"):
-            d = st.date_input("Date")
-            acc = st.selectbox("Paid From", ["Cash on Hand", "Bank Account"])
-            party = st.text_input("Paid To")
-            amt = st.number_input("Amount", min_value=0.0)
-            head = st.selectbox("Account (Expense)", ["Operating Expenses", "Accounts Payable"])
-            if st.form_submit_button("Save"):
-                post_transaction(d, head, f"Payment: {party}", amt, 0, "Payment", party)
-                post_transaction(d, acc, f"Payment: {party}", 0, amt, "Payment", party)
-                st.rerun()
-    st.dataframe(run_query("SELECT * FROM transactions WHERE voucher_type='Payment'", fetch=True), hide_index=True)
+# --- 5. CONTACTS (Customers/Suppliers) ---
+elif choice == "Contacts":
+    st.title("Contacts")
+    with st.form("add_contact"):
+        n = st.text_input("Contact Name")
+        t = st.selectbox("Type", ["Customer", "Supplier"])
+        if st.form_submit_button("Save"):
+            run_query("INSERT INTO parties (name, type) VALUES (?,?)", (n, t))
+            st.rerun()
+    st.dataframe(run_query("SELECT name as Name, type as Type FROM parties", fetch=True), use_container_width=True)
 
+# --- 6. SALES INVOICES ---
 elif choice == "Sales Invoices":
     st.title("Sales Invoices")
-    with st.expander("Create New Invoice"):
+    parties = run_query("SELECT name FROM parties WHERE type='Customer'", fetch=True)['name'].tolist()
+    with st.expander("New Sales Invoice"):
         with st.form("sale_f"):
             d = st.date_input("Date")
-            cust = st.text_input("Customer Name")
+            cust = st.selectbox("Customer", parties) if parties else st.text_input("Customer")
             desc = st.text_input("Description")
-            amt = st.number_input("Total Amount", min_value=0.0)
-            if st.form_submit_button("Generate & Post"):
-                post_transaction(d, "Accounts Receivable", f"Invoice: {desc}", amt, 0, "Sales Invoice", cust)
-                post_transaction(d, "Sales", f"Invoice: {desc}", 0, amt, "Sales Invoice", cust)
-                # Create PDF Download Link
-                pdf_bytes = create_pdf({'date': d, 'customer': cust, 'desc': desc, 'amount': amt})
-                st.download_button("Download PDF Invoice", data=pdf_bytes, file_name=f"Invoice_{cust}.pdf", mime="application/pdf")
-
-elif choice == "Inventory":
-    st.title("Inventory Items")
-    with st.expander("Add New Item"):
-        with st.form("inv_form"):
-            n = st.text_input("Item Name")
-            q = st.number_input("Opening Qty", min_value=0.0)
-            if st.form_submit_button("Add Item"):
-                run_query("INSERT INTO inventory (item_name, qty) VALUES (?,?)", (n, q))
+            amt = st.number_input("Amount", min_value=0.0)
+            if st.form_submit_button("Issue Invoice"):
+                post_transaction(d, "Accounts Receivable", cust, desc, amt, 0, "Invoice", "INV-001")
+                post_transaction(d, "Sales", cust, desc, 0, amt, "Invoice", "INV-001")
+                st.success("Invoice Saved")
                 st.rerun()
-    st.dataframe(run_query("SELECT item_name as Item, qty as Quantity FROM inventory", fetch=True), use_container_width=True, hide_index=True)
